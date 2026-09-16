@@ -108,7 +108,8 @@ workspace, window details, and focus before removing the uniquely named headless
 output. The reserved output name is `RETINA-SCREENSHOT`; using one stable name
 also prevents runtime monitor rules from accumulating under per-process names.
 The same cleanup runs when output configuration, repaint, `grim`, or
-clipboard copying fails.
+clipboard copying fails. Long-lived clipboard and notification helpers receive
+no copy of the capture-lock descriptor, so they cannot block the next capture.
 
 Pinned windows and special workspaces are rejected in v1 because moving them
 safely without changing unrelated desktop state is not guaranteed.

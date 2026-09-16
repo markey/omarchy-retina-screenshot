@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 SCALE=2
 SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY:-1.0}"
 DO_COPY=1
@@ -92,9 +92,9 @@ need() {
 notify() {
   local title=$1 body=$2 urgency=${3:-normal}
   if command -v omarchy-notification-send >/dev/null 2>&1; then
-    omarchy-notification-send "$title" "$body" >/dev/null 2>&1 || true
+    omarchy-notification-send "$title" "$body" 9>&- >/dev/null 2>&1 || true
   elif command -v notify-send >/dev/null 2>&1; then
-    notify-send --urgency="$urgency" "$title" "$body" >/dev/null 2>&1 || true
+    notify-send --urgency="$urgency" "$title" "$body" 9>&- >/dev/null 2>&1 || true
   fi
 }
 
@@ -623,7 +623,9 @@ log "capturing ${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}"
 [[ -s $CAPTURE_FILE ]] || fail "grim produced an empty screenshot"
 
 if [[ $DO_COPY == 1 ]]; then
-  "$WL_COPY" --type image/png <"$CAPTURE_FILE" || fail "could not copy the screenshot to the clipboard"
+  # wl-copy stays alive to serve the Wayland clipboard. Close the capture-lock
+  # descriptor in that child so it cannot keep future captures locked out.
+  "$WL_COPY" --type image/png 9>&- <"$CAPTURE_FILE" || fail "could not copy the screenshot to the clipboard"
 fi
 
 if [[ $DO_SAVE == 1 ]]; then

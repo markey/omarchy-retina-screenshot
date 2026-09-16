@@ -5,7 +5,13 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 SCRIPT="$ROOT/scripts/retina-screenshot"
 TEST_DIR=$(mktemp -d)
-trap 'rm -rf -- "$TEST_DIR"' EXIT
+cleanup() {
+  if [[ -f $TEST_DIR/wl-copy-child ]]; then
+    while IFS= read -r pid; do kill "$pid" 2>/dev/null || true; done <"$TEST_DIR/wl-copy-child"
+  fi
+  rm -rf -- "$TEST_DIR"
+}
+trap cleanup EXIT
 
 BIN="$TEST_DIR/bin"
 STATE="$TEST_DIR/state"
@@ -90,6 +96,10 @@ cat >"$BIN/wl-copy" <<'MOCK'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'wl-copy %s\n' "$*" >>"${MOCK_STATE:?}/log"
+if [[ ${MOCK_WL_COPY_HOLD:-0} == 1 ]]; then
+  sleep 30 </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!" >>"${MOCK_TEST_DIR:?}/wl-copy-child"
+fi
 MOCK
 
 cat >"$BIN/omarchy-notification-send" <<'MOCK'
@@ -102,6 +112,7 @@ chmod +x "$BIN"/* "$SCRIPT"
 run_capture() {
   PATH="$BIN:$PATH" \
   MOCK_STATE="$STATE" \
+  MOCK_TEST_DIR="$TEST_DIR" \
   XDG_RUNTIME_DIR="$TEST_DIR" \
   RETINASHOT_SETTLE_DELAY=0 \
   RETINASHOT_HYPRCTL_BIN="$BIN/hyprctl" \
@@ -112,7 +123,7 @@ run_capture() {
 }
 
 : >"$STATE/log"
-result=$(run_capture)
+result=$(MOCK_WL_COPY_HOLD=1 run_capture)
 [[ -f $result ]]
 grep -q 'picker region' "$STATE/log"
 grep -q 'output create headless RETINA-' "$STATE/log"
@@ -123,6 +134,10 @@ grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 grep -q 'focuswindow address:0xabc' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
+(
+  exec 8>"$TEST_DIR/retina-screenshot.lock"
+  flock -n 8
+)
 
 : >"$STATE/log"
 result=$(run_capture --window)
