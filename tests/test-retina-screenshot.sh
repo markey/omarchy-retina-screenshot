@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+SCRIPT="$ROOT/scripts/retina-screenshot"
+TEST_DIR=$(mktemp -d)
+trap 'rm -rf -- "$TEST_DIR"' EXIT
+
+BIN="$TEST_DIR/bin"
+STATE="$TEST_DIR/state"
+OUT="$TEST_DIR/output"
+mkdir -p "$BIN" "$STATE" "$OUT"
+
+cat >"$BIN/hyprctl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+state=${MOCK_STATE:?}
+log="$state/log"
+printf 'hyprctl %s\n' "$*" >>"$log"
+
+created=0; moved=0
+[[ -f $state/created ]] && created=1
+[[ -f $state/moved ]] && moved=1
+
+if [[ ${1:-} == output && ${2:-} == create ]]; then
+  printf '%s\n' "${4:-}" >"$state/output-name"; : >"$state/created"; exit 0
+fi
+if [[ ${1:-} == output && ${2:-} == remove ]]; then
+  rm -f "$state/created" "$state/output-name"; exit 0
+fi
+if [[ ${1:-} == keyword && ${2:-} == monitor ]]; then exit 0; fi
+if [[ ${1:-} == dispatch ]]; then
+  if [[ ${2:-} == moveworkspacetomonitor ]]; then
+    if [[ ${3:-} == *RETINA-* ]]; then : >"$state/moved"; else rm -f "$state/moved"; fi
+  fi
+  exit 0
+fi
+
+if [[ ${1:-} == -j && ${2:-} == activewindow ]]; then
+  cat <<JSON
+{"address":"0xabc","mapped":true,"at":[100,50],"size":[800,600],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":1,"class":"mock-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0}
+JSON
+  exit 0
+fi
+if [[ ${1:-} == -j && ${2:-} == monitors ]]; then
+  if ((created)); then
+    output_name=$(cat "$state/output-name")
+    cat <<JSON
+[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0},{"id":2,"name":"$output_name","width":3840,"height":2160,"x":1920,"y":0,"scale":2,"transform":0}]
+JSON
+  else
+    printf '[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0}]\n'
+  fi
+  exit 0
+fi
+if [[ ${1:-} == -j && ${2:-} == clients ]]; then
+  if ((moved)); then monitor=2; focused_x=2020; target_x=2920; else monitor=1; focused_x=100; target_x=1000; fi
+  printf '[{"address":"0xabc","mapped":true,"hidden":false,"at":[%s,50],"size":[800,600],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"focused-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":0},{"address":"0xdef","mapped":true,"hidden":false,"at":[%s,100],"size":[600,500],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"selected-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":1}]\n' "$focused_x" "$monitor" "$target_x" "$monitor"
+  exit 0
+fi
+if [[ ${1:-} == -j && ${2:-} == workspaces ]]; then
+  if ((moved)); then monitor=$(cat "$state/output-name"); id=2; else monitor=DP-1; id=1; fi
+  printf '[{"id":1,"name":"1","monitor":"%s","monitorID":%s}]\n' "$monitor" "$id"
+  exit 0
+fi
+exit 1
+MOCK
+
+cat >"$BIN/omarchy-capture-region" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'picker %s\n' "$*" >>"${MOCK_STATE:?}/log"
+case ${1:-region} in
+  region) printf '1100,200 200x150\n' ;;
+  windows) printf '1000,100 600x500\n' ;;
+  *) exit 1 ;;
+esac
+MOCK
+
+cat >"$BIN/grim" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'grim %s\n' "$*" >>"${MOCK_STATE:?}/log"
+[[ ${MOCK_GRIM_FAIL:-0} == 0 ]] || exit 1
+printf 'PNG mock image' >"${@: -1}"
+MOCK
+
+cat >"$BIN/wl-copy" <<'MOCK'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'wl-copy %s\n' "$*" >>"${MOCK_STATE:?}/log"
+MOCK
+
+cat >"$BIN/omarchy-notification-send" <<'MOCK'
+#!/usr/bin/env bash
+printf 'notify %s\n' "$*" >>"${MOCK_STATE:?}/log"
+MOCK
+
+chmod +x "$BIN"/* "$SCRIPT"
+
+run_capture() {
+  PATH="$BIN:$PATH" \
+  MOCK_STATE="$STATE" \
+  XDG_RUNTIME_DIR="$TEST_DIR" \
+  RETINASHOT_SETTLE_DELAY=0 \
+  RETINASHOT_HYPRCTL_BIN="$BIN/hyprctl" \
+  RETINASHOT_GRIM_BIN="$BIN/grim" \
+  RETINASHOT_WL_COPY_BIN="$BIN/wl-copy" \
+  RETINASHOT_PICKER_BIN="$BIN/omarchy-capture-region" \
+    "$SCRIPT" --output-dir "$OUT" "$@"
+}
+
+: >"$STATE/log"
+result=$(run_capture)
+[[ -f $result ]]
+grep -q 'picker region' "$STATE/log"
+grep -q 'output create headless RETINA-' "$STATE/log"
+grep -q 'keyword monitor RETINA-.*3840x2160@60,auto,2' "$STATE/log"
+grep -q 'moveworkspacetomonitor name:1 RETINA-' "$STATE/log"
+grep -q 'grim -g 3020,200 200x150' "$STATE/log"
+grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
+grep -q 'output remove RETINA-' "$STATE/log"
+grep -q 'focuswindow address:0xabc' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+
+: >"$STATE/log"
+result=$(run_capture --window)
+[[ -f $result ]]
+grep -q 'picker windows' "$STATE/log"
+grep -q 'grim -g 2920,100 600x500' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+
+: >"$STATE/log"
+if MOCK_GRIM_FAIL=1 run_capture --window >/dev/null 2>&1; then
+  echo "expected grim failure" >&2
+  exit 1
+fi
+grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
+grep -q 'output remove RETINA-' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+
+printf 'ok: region, selected-window, and failure cleanup paths\n'

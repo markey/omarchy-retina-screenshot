@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "mark.retina-screenshot",
+  "name": "Retina Screenshot",
+  "version": "1.1.0",
+  "author": "Mark",
+  "license": "MIT",
+  "description": "Captures a selected region or window after re-rendering its workspace on a temporary high-DPI Hyprland output",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Retina Screenshot",
+    "description": "High-DPI region and window capture",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

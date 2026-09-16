@@ -1,0 +1,149 @@
+# Retina Screenshot for Omarchy
+
+Retina Screenshot lets you select a region inside any visible window, or select
+a whole window, before moving its **entire workspace** to a temporary 2×
+headless output. Wayland-native applications get a real high-DPI configure event
+and can repaint text, icons, SVGs, browser content, and toolkit UI at the higher
+buffer scale. The result is captured with `grim`, copied with `wl-copy`, and
+saved to the normal Omarchy screenshot directory.
+
+This is rendering, not interpolation. The script never mirrors the physical
+display and does not upscale a normal screenshot afterward.
+
+## Why the whole workspace moves
+
+Removing one tiled window and inserting it again can change Hyprland's tiling
+tree. Moving the workspace preserves tiled order, groups, floating geometry,
+fullscreen state, and the target window's logical dimensions. Only the selected
+region or selected window rectangle is captured. The workspace is returned
+before the temporary output is destroyed.
+
+## Requirements
+
+- Omarchy 4.x / Hyprland with named headless outputs
+- `hyprctl`, `grim`, `wl-copy`, `jq`, `flock`
+- A Wayland-native target application for a guaranteed high-DPI repaint
+
+The current implementation is live-tested on Omarchy 4.0.4 with Hyprland
+0.56.2. It uses Hyprland's Lua monitor/dispatcher API on 0.55+ and retains a
+legacy dispatcher fallback for older Hyprland configurations.
+
+The script detects the focused monitor's physical size and scale. For example,
+a 3440×1440 output at 1.25× has a 2752×1152 logical area, so v1 creates a
+5504×2304 output at scale 2. A 1920×1080 output at scale 1 creates the familiar
+3840×2160 output at scale 2.
+
+## Install
+
+From a published Git repository:
+
+```bash
+omarchy plugin add https://github.com/USER/omarchy-retina-screenshot.git --enable --yes
+```
+
+For local development:
+
+```bash
+mkdir -p ~/.config/omarchy/plugins
+cp -a ./omarchy-retina-screenshot ~/.config/omarchy/plugins/mark.retina-screenshot
+omarchy plugin validate ~/.config/omarchy/plugins/mark.retina-screenshot
+omarchy plugin enable mark.retina-screenshot right
+```
+
+Left-clicking the bar camera opens Omarchy's frozen-screen region picker. The
+pointer changes to the normal selection cursor; drag a rectangle entirely inside
+the window you want. Right-clicking opens the save/clipboard options panel, with
+separate **Select a region** and **Select a whole window** buttons.
+
+## Keyboard shortcut
+
+The service exposes a plugin action:
+
+```bash
+omarchy-shell mark.retina-screenshot capture          # region picker
+omarchy-shell mark.retina-screenshot captureRegion    # region picker
+omarchy-shell mark.retina-screenshot captureWindow    # window picker
+```
+
+Or invoke the script directly:
+
+```bash
+~/.config/omarchy/plugins/mark.retina-screenshot/scripts/retina-screenshot
+```
+
+Add a user-owned binding to `~/.config/hypr/bindings.lua` only if you want it.
+This example does **not** replace Omarchy's normal screenshot shortcut:
+
+```lua
+o.bind("SUPER + SHIFT + R", "Retina Screenshot", "omarchy-shell mark.retina-screenshot capture")
+```
+
+If you deliberately want `SUPER + SHIFT + S`, unbind or change the existing
+Omarchy screenshot action first rather than creating a collision.
+
+## Script usage
+
+```text
+retina-screenshot [--region|--window] [--scale 2] [--delay SECONDS]
+                  [--copy|--no-copy] [--save|--no-save]
+                  [--output-dir DIRECTORY] [--diagnose] [--debug]
+```
+
+Useful checks:
+
+```bash
+scripts/retina-screenshot --diagnose
+RETINASHOT_DEBUG=1 scripts/retina-screenshot --delay 1.5
+```
+
+The save directory follows `OMARCHY_SCREENSHOT_DIR`, `XDG_PICTURES_DIR`, then
+`~/Pictures`, matching Omarchy's screenshot command.
+
+## Safety and cleanup
+
+Before changing the compositor, the script records the focused window, monitor,
+workspace, tiled/floating state, fullscreen state, and geometry. A single-instance
+lock prevents overlapping captures. `EXIT`, `INT`, and `TERM` traps restore the
+workspace, window details, and focus before removing the uniquely named headless
+output. The reserved output name is `RETINA-SCREENSHOT`; using one stable name
+also prevents runtime monitor rules from accumulating under per-process names.
+The same cleanup runs when output configuration, repaint, `grim`, or
+clipboard copying fails.
+
+Pinned windows and special workspaces are rejected in v1 because moving them
+safely without changing unrelated desktop state is not guaranteed.
+
+## Accuracy notes
+
+- Native Wayland Chromium/Electron, Qt, and GTK apps can react to the output's
+  integer buffer scale and render real additional detail.
+- XWayland has no general per-output HiDPI mechanism. The script warns but still
+  captures; such a window may remain low-resolution or be compositor-scaled.
+- Hyprland does not expose a universal "application finished repainting" event.
+  v1 waits for stable compositor geometry, then uses a configurable one-second
+  repaint delay. Increase `--delay` for a slow application.
+- Region mode is the default. The selection must fit entirely inside one visible
+  regular workspace window. Window mode uses Omarchy's highlighted window picker.
+- Workspace, 3×, and supersampled-downsample modes are not implemented.
+
+## Validate and test
+
+```bash
+omarchy plugin validate .
+bash -n scripts/retina-screenshot tests/test-retina-screenshot.sh
+tests/test-retina-screenshot.sh
+```
+
+The test harness mocks Hyprland and verifies region translation, selection of a
+window other than the focused one, successful cleanup, and cleanup after a
+forced `grim` failure.
+
+Live verification on the test system produced:
+
+- floating window: 900×650 logical → 1800×1300 PNG, identical state afterward
+- tiled window: 2728×1102 logical → 5456×2204 PNG, identical state afterward
+- no `RETINA-*` output remaining after either capture
+
+## License
+
+MIT

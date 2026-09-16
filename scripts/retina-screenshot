@@ -1,0 +1,643 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+VERSION="1.1.0"
+SCALE=2
+SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY:-1.0}"
+DO_COPY=1
+DO_SAVE=1
+OUTPUT_DIR=""
+DIAGNOSE=0
+DEBUG="${RETINASHOT_DEBUG:-0}"
+CAPTURE_MODE="region"
+
+HYPRCTL="${RETINASHOT_HYPRCTL_BIN:-hyprctl}"
+GRIM="${RETINASHOT_GRIM_BIN:-grim}"
+WL_COPY="${RETINASHOT_WL_COPY_BIN:-wl-copy}"
+PICKER="${RETINASHOT_PICKER_BIN:-omarchy-capture-region}"
+
+OUTPUT_NAME=""
+OUTPUT_CREATED=0
+WORKSPACE_MOVED=0
+RUNTIME_DIR=""
+CAPTURE_FILE=""
+FINAL_PATH=""
+SUCCESS=0
+ERROR_MESSAGE=""
+XWAYLAND_WARNING=0
+HYPRLAND_LUA=0
+CANCELLED=0
+
+INITIAL_FOCUSED_ADDRESS=""
+SELECTION=""
+SELECTION_X=0
+SELECTION_Y=0
+SELECTION_WIDTH=0
+SELECTION_HEIGHT=0
+REGION_OFFSET_X=0
+REGION_OFFSET_Y=0
+
+ORIGINAL_WINDOW=''
+ORIGINAL_ADDRESS=""
+ORIGINAL_WORKSPACE=""
+ORIGINAL_MONITOR=""
+ORIGINAL_AT_X=0
+ORIGINAL_AT_Y=0
+ORIGINAL_WIDTH=0
+ORIGINAL_HEIGHT=0
+ORIGINAL_FLOATING=false
+ORIGINAL_FULLSCREEN=0
+ORIGINAL_FULLSCREEN_CLIENT=0
+
+usage() {
+  cat <<'USAGE'
+Usage: retina-screenshot [options]
+
+Interactively select a region or window, then capture it after its Hyprland
+workspace re-renders on a temporary 2x headless output.
+
+Options:
+  --region                 Select a region inside a window (default)
+  --window                 Select and capture a whole window
+  --scale 2                Virtual output scale; currently supports exactly 2
+  --delay SECONDS          Repaint delay after the move (default: 1.0)
+  --copy / --no-copy       Enable or disable clipboard output
+  --save / --no-save       Enable or disable saving to disk
+  --output-dir DIRECTORY   Override the screenshot directory
+  --diagnose               Print the capture plan without changing Hyprland
+  --debug                   Print progress to stderr
+  --version                 Print the version
+  -h, --help                Show this help
+
+The picker uses Omarchy's normal frozen-screen region/window UI. The screenshot
+directory follows OMARCHY_SCREENSHOT_DIR, XDG_PICTURES_DIR, or ~/Pictures.
+USAGE
+}
+
+log() {
+  [[ $DEBUG == 1 ]] && printf 'retina-screenshot: %s\n' "$*" >&2 || true
+}
+
+fail() {
+  ERROR_MESSAGE="$*"
+  printf 'retina-screenshot: %s\n' "$*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+notify() {
+  local title=$1 body=$2 urgency=${3:-normal}
+  if command -v omarchy-notification-send >/dev/null 2>&1; then
+    omarchy-notification-send "$title" "$body" >/dev/null 2>&1 || true
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send --urgency="$urgency" "$title" "$body" >/dev/null 2>&1 || true
+  fi
+}
+
+hypr_json() {
+  "$HYPRCTL" -j "$@"
+}
+
+legacy_dispatch() {
+  "$HYPRCTL" dispatch "$1" "$2" >/dev/null
+}
+
+lua_quote() {
+  jq -nr --arg value "$1" '$value | tojson'
+}
+
+lua_dispatch() {
+  "$HYPRCTL" eval "hl.dispatch($1)" >/dev/null
+}
+
+move_workspace_to_monitor() {
+  local workspace=$1 monitor=$2
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.workspace.move({ workspace = $(lua_quote "name:$workspace"), monitor = $(lua_quote "$monitor") })"
+  else
+    legacy_dispatch moveworkspacetomonitor "name:$workspace $monitor"
+  fi
+}
+
+focus_window() {
+  local address=$1
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.focus({ window = $(lua_quote "address:$address") })"
+  else
+    legacy_dispatch focuswindow "address:$address"
+  fi
+}
+
+focus_monitor() {
+  local monitor=$1
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.focus({ monitor = $(lua_quote "$monitor") })"
+  else
+    legacy_dispatch focusmonitor "$monitor"
+  fi
+}
+
+focus_workspace() {
+  local workspace=$1
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.focus({ workspace = $(lua_quote "name:$workspace") })"
+  else
+    legacy_dispatch workspace "name:$workspace"
+  fi
+}
+
+set_window_floating() {
+  local address=$1 floating=$2 action
+  [[ $floating == true ]] && action=enable || action=disable
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.window.float({ window = $(lua_quote "address:$address"), action = $(lua_quote "$action") })"
+  elif [[ $floating == true ]]; then
+    legacy_dispatch setfloating "address:$address"
+  else
+    legacy_dispatch settiled "address:$address"
+  fi
+}
+
+set_window_fullscreen_state() {
+  local address=$1 internal=$2 client=$3
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.window.fullscreen_state({ window = $(lua_quote "address:$address"), action = \"set\", internal = $internal, client = $client })"
+  else
+    focus_window "$address" || true
+    legacy_dispatch fullscreenstate "$internal $client"
+  fi
+}
+
+resize_window() {
+  local address=$1 width=$2 height=$3
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.window.resize({ window = $(lua_quote "address:$address"), x = $width, y = $height, relative = false })"
+  else
+    legacy_dispatch resizewindowpixel "exact $width $height,address:$address"
+  fi
+}
+
+move_window() {
+  local address=$1 x=$2 y=$3
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.window.move({ window = $(lua_quote "address:$address"), x = $x, y = $y, relative = false })"
+  else
+    legacy_dispatch movewindowpixel "exact $x $y,address:$address"
+  fi
+}
+
+configure_output() {
+  local name=$1 width=$2 height=$3 scale=$4
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    "$HYPRCTL" eval \
+      "hl.monitor({ output = $(lua_quote "$name"), mode = \"${width}x${height}@60\", position = \"auto\", scale = $scale })" \
+      >/dev/null
+  else
+    "$HYPRCTL" keyword monitor "$name,${width}x${height}@60,auto,$scale" >/dev/null
+  fi
+}
+
+client_json() {
+  hypr_json clients | jq -c --arg address "$ORIGINAL_ADDRESS" \
+    '.[] | select(.address == $address)' | head -n1
+}
+
+workspace_monitor() {
+  hypr_json workspaces | jq -r --arg workspace "$ORIGINAL_WORKSPACE" \
+    '.[] | select(.name == $workspace) | .monitor' | head -n1
+}
+
+restore_window_details() {
+  local current current_floating current_fullscreen current_fullscreen_client
+  current=$(client_json 2>/dev/null || true)
+  [[ -n $current ]] || return 0
+
+  focus_window "$ORIGINAL_ADDRESS" || true
+
+  current_floating=$(jq -r '.floating' <<<"$current")
+  if [[ $current_floating != "$ORIGINAL_FLOATING" ]]; then
+    if [[ $ORIGINAL_FLOATING == true ]]; then
+      set_window_floating "$ORIGINAL_ADDRESS" true || true
+    else
+      set_window_floating "$ORIGINAL_ADDRESS" false || true
+    fi
+  fi
+
+  current_fullscreen=$(jq -r '.fullscreen // 0' <<<"$current")
+  current_fullscreen_client=$(jq -r '.fullscreenClient // 0' <<<"$current")
+  if [[ $current_fullscreen != "$ORIGINAL_FULLSCREEN" || \
+        $current_fullscreen_client != "$ORIGINAL_FULLSCREEN_CLIENT" ]]; then
+    set_window_fullscreen_state "$ORIGINAL_ADDRESS" \
+      "$ORIGINAL_FULLSCREEN" "$ORIGINAL_FULLSCREEN_CLIENT" || true
+  fi
+
+  if [[ $ORIGINAL_FLOATING == true && $ORIGINAL_FULLSCREEN == 0 ]]; then
+    resize_window "$ORIGINAL_ADDRESS" "$ORIGINAL_WIDTH" "$ORIGINAL_HEIGHT" || true
+    move_window "$ORIGINAL_ADDRESS" "$ORIGINAL_AT_X" "$ORIGINAL_AT_Y" || true
+  fi
+}
+
+cleanup_layout() {
+  local monitor_now=""
+  set +e
+
+  if [[ $WORKSPACE_MOVED == 1 && -n $ORIGINAL_WORKSPACE && -n $ORIGINAL_MONITOR ]]; then
+    monitor_now=$(workspace_monitor 2>/dev/null)
+    if [[ $monitor_now != "$ORIGINAL_MONITOR" ]]; then
+      log "restoring workspace $ORIGINAL_WORKSPACE to $ORIGINAL_MONITOR"
+      move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$ORIGINAL_MONITOR" || true
+    fi
+  fi
+
+  if [[ $OUTPUT_CREATED == 1 && -n $OUTPUT_NAME ]]; then
+    log "removing temporary output $OUTPUT_NAME"
+    "$HYPRCTL" output remove "$OUTPUT_NAME" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n $ORIGINAL_WORKSPACE && -n $ORIGINAL_MONITOR ]]; then
+    monitor_now=$(workspace_monitor 2>/dev/null)
+    if [[ -n $monitor_now && $monitor_now != "$ORIGINAL_MONITOR" ]]; then
+      move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$ORIGINAL_MONITOR" || true
+    fi
+    focus_monitor "$ORIGINAL_MONITOR" || true
+    focus_workspace "$ORIGINAL_WORKSPACE" || true
+  fi
+
+  [[ -n $ORIGINAL_ADDRESS ]] && restore_window_details
+  if [[ -n $INITIAL_FOCUSED_ADDRESS ]]; then
+    focus_window "$INITIAL_FOCUSED_ADDRESS" || true
+  elif [[ -n $ORIGINAL_ADDRESS ]]; then
+    focus_window "$ORIGINAL_ADDRESS" || true
+  fi
+  set -e
+}
+
+finish() {
+  local status=$?
+  trap - EXIT INT TERM
+  cleanup_layout
+
+  [[ -n $RUNTIME_DIR && -d $RUNTIME_DIR ]] && rm -rf -- "$RUNTIME_DIR"
+
+  if [[ $CANCELLED == 1 ]]; then
+    exit 0
+  fi
+
+  if [[ $status -eq 0 && $SUCCESS == 1 ]]; then
+    if [[ $DO_SAVE == 1 && $DO_COPY == 1 ]]; then
+      notify "Retina Screenshot" "Saved to $FINAL_PATH and copied to the clipboard"
+    elif [[ $DO_SAVE == 1 ]]; then
+      notify "Retina Screenshot" "Saved to $FINAL_PATH"
+    else
+      notify "Retina Screenshot" "Copied to the clipboard"
+    fi
+    [[ $XWAYLAND_WARNING == 1 ]] && \
+      notify "Retina Screenshot" "XWayland cannot guarantee a true high-DPI repaint" normal
+  elif [[ $status -ne 0 ]]; then
+    notify "Retina Screenshot failed" "${ERROR_MESSAGE:-Unexpected capture error; the desktop was restored}" critical
+  fi
+
+  exit "$status"
+}
+
+trap finish EXIT
+trap 'ERROR_MESSAGE=${ERROR_MESSAGE:-"Interrupted; restoring the desktop"}; exit 130' INT TERM
+
+while (($#)); do
+  case "$1" in
+    --region) CAPTURE_MODE="region" ;;
+    --window) CAPTURE_MODE="window" ;;
+    --scale)
+      (($# >= 2)) || fail "--scale requires a value"
+      SCALE=$2
+      shift
+      ;;
+    --delay)
+      (($# >= 2)) || fail "--delay requires a value"
+      SETTLE_DELAY=$2
+      shift
+      ;;
+    --copy) DO_COPY=1 ;;
+    --no-copy) DO_COPY=0 ;;
+    --save) DO_SAVE=1 ;;
+    --no-save) DO_SAVE=0 ;;
+    --output-dir)
+      (($# >= 2)) || fail "--output-dir requires a value"
+      OUTPUT_DIR=$2
+      shift
+      ;;
+    --diagnose) DIAGNOSE=1 ;;
+    --debug) DEBUG=1 ;;
+    --workspace)
+      fail "$1 is not supported"
+      ;;
+    --version)
+      printf 'retina-screenshot %s\n' "$VERSION"
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *) fail "unknown option: $1" ;;
+  esac
+  shift
+done
+
+[[ $SCALE == 2 ]] || fail "currently supports only --scale 2"
+[[ $SETTLE_DELAY =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || \
+  fail "--delay must be a non-negative number"
+((DO_COPY == 1 || DO_SAVE == 1)) || fail "nothing to do: both saving and copying are disabled"
+
+need "$HYPRCTL"
+need "$GRIM"
+need jq
+need "$PICKER"
+((DO_COPY == 0)) || need "$WL_COPY"
+
+if "$HYPRCTL" eval 'return "retina-screenshot"' >/dev/null 2>&1; then
+  HYPRLAND_LUA=1
+fi
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/retina-screenshot.lock"
+flock -n 9 || fail "another Retina Screenshot capture is already running"
+
+INITIAL_FOCUSED_WINDOW=$(hypr_json activewindow 2>/dev/null || printf '{}')
+INITIAL_FOCUSED_ADDRESS=$(jq -r '.address // ""' <<<"$INITIAL_FOCUSED_WINDOW")
+
+PICKER_MODE="$CAPTURE_MODE"
+[[ $CAPTURE_MODE == window ]] && PICKER_MODE="windows"
+log "opening the $CAPTURE_MODE picker"
+if ! SELECTION=$("$PICKER" "$PICKER_MODE"); then
+  CANCELLED=1
+  exit 0
+fi
+[[ -n $SELECTION ]] || { CANCELLED=1; exit 0; }
+
+if [[ $SELECTION =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]+([0-9]+)x([0-9]+)$ ]]; then
+  SELECTION_X=${BASH_REMATCH[1]}
+  SELECTION_Y=${BASH_REMATCH[2]}
+  SELECTION_WIDTH=${BASH_REMATCH[3]}
+  SELECTION_HEIGHT=${BASH_REMATCH[4]}
+else
+  fail "the picker returned invalid geometry: $SELECTION"
+fi
+((SELECTION_WIDTH > 0 && SELECTION_HEIGHT > 0)) || fail "the selected area is empty"
+
+CLIENTS=$(hypr_json clients) || fail "could not query Hyprland windows"
+if [[ $CAPTURE_MODE == region ]]; then
+  ORIGINAL_WINDOW=$(jq -c \
+    --argjson x "$SELECTION_X" --argjson y "$SELECTION_Y" \
+    --argjson w "$SELECTION_WIDTH" --argjson h "$SELECTION_HEIGHT" '
+      [.[] | select(
+        .mapped == true and .hidden != true and
+        $x >= .at[0] and $y >= .at[1] and
+        ($x + $w) <= (.at[0] + .size[0]) and
+        ($y + $h) <= (.at[1] + .size[1])
+      )]
+      | sort_by((.size[0] * .size[1]), (.focusHistoryID // 999999))
+      | .[0] // empty
+    ' <<<"$CLIENTS")
+  [[ -n $ORIGINAL_WINDOW ]] || \
+    fail "select a region entirely inside one visible window"
+else
+  ORIGINAL_WINDOW=$(jq -c \
+    --argjson x "$SELECTION_X" --argjson y "$SELECTION_Y" \
+    --argjson w "$SELECTION_WIDTH" --argjson h "$SELECTION_HEIGHT" '
+      [.[] | select(
+        .mapped == true and .hidden != true and
+        .at[0] == $x and .at[1] == $y and
+        .size[0] == $w and .size[1] == $h
+      )]
+      | sort_by(.focusHistoryID // 999999)
+      | .[0] // empty
+    ' <<<"$CLIENTS")
+  [[ -n $ORIGINAL_WINDOW ]] || \
+    fail "select a highlighted window rather than the monitor background"
+fi
+
+ORIGINAL_ADDRESS=$(jq -r '.address // ""' <<<"$ORIGINAL_WINDOW")
+[[ -n $ORIGINAL_ADDRESS && $ORIGINAL_ADDRESS != 0x0 ]] || fail "could not identify the selected window"
+[[ $(jq -r '.mapped // false' <<<"$ORIGINAL_WINDOW") == true ]] || fail "selected window is not mapped"
+[[ $(jq -r '.pinned // false' <<<"$ORIGINAL_WINDOW") == false ]] || \
+  fail "pinned windows are not supported safely"
+
+ORIGINAL_WORKSPACE=$(jq -r '.workspace.name // ""' <<<"$ORIGINAL_WINDOW")
+[[ -n $ORIGINAL_WORKSPACE ]] || fail "could not determine the selected window's workspace"
+[[ $ORIGINAL_WORKSPACE != special:* ]] || fail "special workspaces are not supported safely"
+[[ $ORIGINAL_WORKSPACE != *$'\n'* && $ORIGINAL_WORKSPACE != *,* ]] || \
+  fail "workspace names containing commas or newlines are not supported"
+
+ORIGINAL_MONITOR_ID=$(jq -r '.monitor' <<<"$ORIGINAL_WINDOW")
+MONITORS=$(hypr_json monitors all) || fail "could not query Hyprland outputs"
+SOURCE_MONITOR_JSON=$(jq -c --argjson id "$ORIGINAL_MONITOR_ID" \
+  '.[] | select(.id == $id)' <<<"$MONITORS" | head -n1)
+[[ -n $SOURCE_MONITOR_JSON ]] || fail "could not find the focused window's monitor"
+ORIGINAL_MONITOR=$(jq -r '.name' <<<"$SOURCE_MONITOR_JSON")
+
+ORIGINAL_AT_X=$(jq -r '.at[0]' <<<"$ORIGINAL_WINDOW")
+ORIGINAL_AT_Y=$(jq -r '.at[1]' <<<"$ORIGINAL_WINDOW")
+ORIGINAL_WIDTH=$(jq -r '.size[0]' <<<"$ORIGINAL_WINDOW")
+ORIGINAL_HEIGHT=$(jq -r '.size[1]' <<<"$ORIGINAL_WINDOW")
+ORIGINAL_FLOATING=$(jq -r '.floating // false' <<<"$ORIGINAL_WINDOW")
+ORIGINAL_FULLSCREEN=$(jq -r '.fullscreen // 0' <<<"$ORIGINAL_WINDOW")
+ORIGINAL_FULLSCREEN_CLIENT=$(jq -r '.fullscreenClient // 0' <<<"$ORIGINAL_WINDOW")
+[[ $(jq -r '.xwayland // false' <<<"$ORIGINAL_WINDOW") == false ]] || XWAYLAND_WARNING=1
+
+if [[ $CAPTURE_MODE == region ]]; then
+  REGION_OFFSET_X=$((SELECTION_X - ORIGINAL_AT_X))
+  REGION_OFFSET_Y=$((SELECTION_Y - ORIGINAL_AT_Y))
+fi
+
+SOURCE_WIDTH=$(jq -r '.width' <<<"$SOURCE_MONITOR_JSON")
+SOURCE_HEIGHT=$(jq -r '.height' <<<"$SOURCE_MONITOR_JSON")
+SOURCE_SCALE=$(jq -r '.scale' <<<"$SOURCE_MONITOR_JSON")
+SOURCE_TRANSFORM=$(jq -r '.transform // 0' <<<"$SOURCE_MONITOR_JSON")
+
+if ((SOURCE_TRANSFORM % 2 == 1)); then
+  LOGICAL_WIDTH=$(jq -nr --argjson h "$SOURCE_HEIGHT" --argjson s "$SOURCE_SCALE" \
+    '$h / $s | round')
+  LOGICAL_HEIGHT=$(jq -nr --argjson w "$SOURCE_WIDTH" --argjson s "$SOURCE_SCALE" \
+    '$w / $s | round')
+else
+  LOGICAL_WIDTH=$(jq -nr --argjson w "$SOURCE_WIDTH" --argjson s "$SOURCE_SCALE" \
+    '$w / $s | round')
+  LOGICAL_HEIGHT=$(jq -nr --argjson h "$SOURCE_HEIGHT" --argjson s "$SOURCE_SCALE" \
+    '$h / $s | round')
+fi
+VIRTUAL_WIDTH=$((LOGICAL_WIDTH * SCALE))
+VIRTUAL_HEIGHT=$((LOGICAL_HEIGHT * SCALE))
+
+if [[ $DIAGNOSE == 1 ]]; then
+  jq -n \
+    --arg mode "$CAPTURE_MODE" \
+    --arg selection "$SELECTION" \
+    --arg window "$ORIGINAL_ADDRESS" \
+    --arg class "$(jq -r '.class // ""' <<<"$ORIGINAL_WINDOW")" \
+    --arg monitor "$ORIGINAL_MONITOR" \
+    --arg workspace "$ORIGINAL_WORKSPACE" \
+    --argjson sourceWidth "$SOURCE_WIDTH" \
+    --argjson sourceHeight "$SOURCE_HEIGHT" \
+    --argjson sourceScale "$SOURCE_SCALE" \
+    --argjson logicalWidth "$LOGICAL_WIDTH" \
+    --argjson logicalHeight "$LOGICAL_HEIGHT" \
+    --argjson virtualWidth "$VIRTUAL_WIDTH" \
+    --argjson virtualHeight "$VIRTUAL_HEIGHT" \
+    --argjson virtualScale "$SCALE" \
+    --argjson xwayland "$XWAYLAND_WARNING" \
+    '{mode:$mode,selection:$selection,window:$window,class:$class,monitor:$monitor,workspace:$workspace,
+      source:{width:$sourceWidth,height:$sourceHeight,scale:$sourceScale},
+      logical:{width:$logicalWidth,height:$logicalHeight},
+      virtual:{width:$virtualWidth,height:$virtualHeight,scale:$virtualScale},
+      xwayland:($xwayland == 1)}'
+  exit 0
+fi
+
+if [[ -z $OUTPUT_DIR ]]; then
+  if [[ -n ${OMARCHY_SCREENSHOT_DIR:-} ]]; then
+    OUTPUT_DIR=$OMARCHY_SCREENSHOT_DIR
+  else
+    [[ -f ${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs ]] && \
+      source "${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"
+    OUTPUT_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}"
+  fi
+fi
+
+if [[ $DO_SAVE == 1 ]]; then
+  mkdir -p -- "$OUTPUT_DIR"
+  [[ -d $OUTPUT_DIR && -w $OUTPUT_DIR ]] || fail "screenshot directory is not writable: $OUTPUT_DIR"
+fi
+
+RUNTIME_DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/retina-screenshot.XXXXXX")
+CAPTURE_FILE="$RUNTIME_DIR/capture.png"
+OUTPUT_NAME="RETINA-SCREENSHOT"
+if jq -e --arg name "$OUTPUT_NAME" '.[] | select(.name == $name)' <<<"$MONITORS" >/dev/null; then
+  fail "reserved output $OUTPUT_NAME already exists; remove it before retrying"
+fi
+
+jq -n \
+  --arg output "$OUTPUT_NAME" \
+  --arg mode "$CAPTURE_MODE" \
+  --arg selection "$SELECTION" \
+  --arg address "$ORIGINAL_ADDRESS" \
+  --arg monitor "$ORIGINAL_MONITOR" \
+  --arg workspace "$ORIGINAL_WORKSPACE" \
+  --argjson window "$ORIGINAL_WINDOW" \
+  '{temporaryOutput:$output,mode:$mode,selection:$selection,address:$address,monitor:$monitor,workspace:$workspace,window:$window}' \
+  >"$RUNTIME_DIR/state.json"
+
+log "raising selected window $ORIGINAL_ADDRESS for an unobstructed capture"
+focus_window "$ORIGINAL_ADDRESS" || fail "could not focus the selected window"
+
+log "creating $OUTPUT_NAME at ${VIRTUAL_WIDTH}x${VIRTUAL_HEIGHT}, scale $SCALE"
+if [[ $HYPRLAND_LUA == 1 ]]; then
+  # The headless backend chooses its framebuffer mode at creation time. Register
+  # the named output rule first; changing it only after creation can leave the
+  # backend on its 1920x1080 fallback mode.
+  configure_output "$OUTPUT_NAME" "$VIRTUAL_WIDTH" "$VIRTUAL_HEIGHT" "$SCALE" || \
+    fail "could not register the headless output mode"
+fi
+"$HYPRCTL" output create headless "$OUTPUT_NAME" >/dev/null || fail "could not create the headless output"
+OUTPUT_CREATED=1
+
+if [[ $HYPRLAND_LUA == 0 ]]; then
+  configure_output "$OUTPUT_NAME" "$VIRTUAL_WIDTH" "$VIRTUAL_HEIGHT" "$SCALE" || \
+    fail "could not configure the headless output"
+fi
+
+OUTPUT_READY=0
+for _ in {1..50}; do
+  HEADLESS_JSON=$(hypr_json monitors all | jq -c --arg name "$OUTPUT_NAME" \
+    '.[] | select(.name == $name)' | head -n1)
+  if [[ -n $HEADLESS_JSON && \
+        $(jq -r '.width' <<<"$HEADLESS_JSON") == "$VIRTUAL_WIDTH" && \
+        $(jq -r '.height' <<<"$HEADLESS_JSON") == "$VIRTUAL_HEIGHT" && \
+        $(jq -r '.scale' <<<"$HEADLESS_JSON") == "$SCALE" ]]; then
+    OUTPUT_READY=1
+    break
+  fi
+  sleep 0.05
+done
+[[ $OUTPUT_READY == 1 ]] || fail "the headless output did not reach the requested mode"
+HEADLESS_ID=$(jq -r '.id' <<<"$HEADLESS_JSON")
+
+log "moving workspace $ORIGINAL_WORKSPACE to $OUTPUT_NAME"
+move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$OUTPUT_NAME" || \
+  fail "could not move workspace $ORIGINAL_WORKSPACE to the headless output"
+WORKSPACE_MOVED=1
+
+CLIENT_READY=0
+for _ in {1..50}; do
+  CURRENT_WINDOW=$(client_json 2>/dev/null || true)
+  if [[ -n $CURRENT_WINDOW && $(jq -r '.monitor' <<<"$CURRENT_WINDOW") == "$HEADLESS_ID" ]]; then
+    CLIENT_READY=1
+    break
+  fi
+  sleep 0.05
+done
+[[ $CLIENT_READY == 1 ]] || fail "the selected window did not arrive on the headless output"
+
+PREVIOUS_GEOMETRY=""
+STABLE_COUNT=0
+for _ in {1..20}; do
+  CURRENT_WINDOW=$(client_json 2>/dev/null || true)
+  [[ -n $CURRENT_WINDOW ]] || fail "the target window closed before capture"
+  CURRENT_GEOMETRY=$(jq -r '[.at[0],.at[1],.size[0],.size[1]] | @tsv' <<<"$CURRENT_WINDOW")
+  if [[ $CURRENT_GEOMETRY == "$PREVIOUS_GEOMETRY" ]]; then
+    ((STABLE_COUNT += 1))
+    ((STABLE_COUNT >= 2)) && break
+  else
+    PREVIOUS_GEOMETRY=$CURRENT_GEOMETRY
+    STABLE_COUNT=0
+  fi
+  sleep 0.1
+done
+
+read -r CURRENT_X CURRENT_Y CURRENT_WIDTH CURRENT_HEIGHT <<<"$CURRENT_GEOMETRY"
+[[ $CURRENT_WIDTH -gt 0 && $CURRENT_HEIGHT -gt 0 ]] || fail "target window has invalid geometry"
+
+if [[ $CAPTURE_MODE == region ]]; then
+  ((REGION_OFFSET_X >= 0 && REGION_OFFSET_Y >= 0)) || fail "selected region moved outside the target window"
+  ((REGION_OFFSET_X + SELECTION_WIDTH <= CURRENT_WIDTH && \
+    REGION_OFFSET_Y + SELECTION_HEIGHT <= CURRENT_HEIGHT)) || \
+    fail "selected region no longer fits inside the target window"
+  CAPTURE_X=$((CURRENT_X + REGION_OFFSET_X))
+  CAPTURE_Y=$((CURRENT_Y + REGION_OFFSET_Y))
+  CAPTURE_WIDTH=$SELECTION_WIDTH
+  CAPTURE_HEIGHT=$SELECTION_HEIGHT
+else
+  CAPTURE_X=$CURRENT_X
+  CAPTURE_Y=$CURRENT_Y
+  CAPTURE_WIDTH=$CURRENT_WIDTH
+  CAPTURE_HEIGHT=$CURRENT_HEIGHT
+fi
+
+sleep "$SETTLE_DELAY"
+log "capturing ${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}"
+"$GRIM" -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \
+  "$CAPTURE_FILE" || fail "grim could not capture the high-DPI selection"
+[[ -s $CAPTURE_FILE ]] || fail "grim produced an empty screenshot"
+
+if [[ $DO_COPY == 1 ]]; then
+  "$WL_COPY" --type image/png <"$CAPTURE_FILE" || fail "could not copy the screenshot to the clipboard"
+fi
+
+if [[ $DO_SAVE == 1 ]]; then
+  BASENAME="retina-screenshot-$(date +'%Y-%m-%d_%H-%M-%S')"
+  FINAL_PATH="$OUTPUT_DIR/$BASENAME.png"
+  SUFFIX=1
+  while [[ -e $FINAL_PATH ]]; do
+    FINAL_PATH="$OUTPUT_DIR/$BASENAME-$SUFFIX.png"
+    ((SUFFIX += 1))
+  done
+  mv -- "$CAPTURE_FILE" "$FINAL_PATH"
+  printf '%s\n' "$FINAL_PATH"
+else
+  printf '%s\n' "copied"
+fi
+
+SUCCESS=1
