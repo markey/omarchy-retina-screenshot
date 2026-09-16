@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/retina-screenshot-hero.png" alt="Retina Screenshot — true high-DPI capture for Omarchy" width="100%">
+  <img src="preview.png" alt="Retina Screenshot — true high-DPI capture for Omarchy" width="100%">
 
   <p><strong>Genuinely high-resolution region and window screenshots for Omarchy.</strong></p>
 
@@ -67,6 +67,17 @@ Left-clicking the bar camera opens Omarchy's frozen-screen region picker. The
 pointer changes to the normal selection cursor; drag a rectangle entirely inside
 the window you want. Right-clicking opens the save/clipboard options panel, with
 separate **Select a region** and **Select a whole window** buttons.
+
+## Uninstall
+
+Remove the installed plugin and its bar entry with:
+
+```bash
+omarchy plugin remove mark.retina-screenshot --yes
+```
+
+Saved screenshots are ordinary image files and are not deleted when the plugin
+is removed.
 
 ## Keyboard shortcut
 
