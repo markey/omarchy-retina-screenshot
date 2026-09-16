@@ -110,6 +110,9 @@ also prevents runtime monitor rules from accumulating under per-process names.
 The same cleanup runs when output configuration, repaint, `grim`, or
 clipboard copying fails. Long-lived clipboard and notification helpers receive
 no copy of the capture-lock descriptor, so they cannot block the next capture.
+The picker also temporarily uses Omarchy's hardware-cursor setting so the live
+selection cursor remains visible over the frozen desktop, restoring the user's
+previous cursor mode on every exit path.
 
 Pinned windows and special workspaces are rejected in v1 because moving them
 safely without changing unrelated desktop state is not guaranteed.

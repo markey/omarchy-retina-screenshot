@@ -36,6 +36,7 @@ if [[ ${1:-} == output && ${2:-} == remove ]]; then
   rm -f "$state/created" "$state/output-name"; exit 0
 fi
 if [[ ${1:-} == keyword && ${2:-} == monitor ]]; then exit 0; fi
+if [[ ${1:-} == keyword && ${2:-} == cursor:no_hardware_cursors ]]; then exit 0; fi
 if [[ ${1:-} == dispatch ]]; then
   if [[ ${2:-} == moveworkspacetomonitor ]]; then
     if [[ ${3:-} == *RETINA-* ]]; then : >"$state/moved"; else rm -f "$state/moved"; fi
@@ -47,6 +48,10 @@ if [[ ${1:-} == -j && ${2:-} == activewindow ]]; then
   cat <<JSON
 {"address":"0xabc","mapped":true,"at":[100,50],"size":[800,600],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":1,"class":"mock-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0}
 JSON
+  exit 0
+fi
+if [[ ${1:-} == getoption && ${2:-} == cursor:no_hardware_cursors ]]; then
+  printf '{"int":2}\n'
   exit 0
 fi
 if [[ ${1:-} == -j && ${2:-} == monitors ]]; then
@@ -126,6 +131,7 @@ run_capture() {
 result=$(MOCK_WL_COPY_HOLD=1 run_capture)
 [[ -f $result ]]
 grep -q 'picker region' "$STATE/log"
+grep -q 'keyword cursor:no_hardware_cursors 0' "$STATE/log"
 grep -q 'output create headless RETINA-' "$STATE/log"
 grep -q 'keyword monitor RETINA-.*3840x2160@60,auto,2' "$STATE/log"
 grep -q 'moveworkspacetomonitor name:1 RETINA-' "$STATE/log"
@@ -133,6 +139,7 @@ grep -q 'grim -g 3020,200 200x150' "$STATE/log"
 grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 grep -q 'focuswindow address:0xabc' "$STATE/log"
+grep -q 'keyword cursor:no_hardware_cursors 2' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 (
   exec 8>"$TEST_DIR/retina-screenshot.lock"

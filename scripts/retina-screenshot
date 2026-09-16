@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 SCALE=2
 SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY:-1.0}"
 DO_COPY=1
@@ -28,6 +28,8 @@ ERROR_MESSAGE=""
 XWAYLAND_WARNING=0
 HYPRLAND_LUA=0
 CANCELLED=0
+CURSOR_OVERRIDE_ACTIVE=0
+ORIGINAL_NO_HW_CURSORS=""
 
 INITIAL_FOCUSED_ADDRESS=""
 SELECTION=""
@@ -201,6 +203,16 @@ configure_output() {
   fi
 }
 
+set_no_hw_cursors() {
+  local value=$1
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    "$HYPRCTL" eval "hl.config({ cursor = { no_hardware_cursors = $value } })" >/dev/null 2>&1 ||
+      "$HYPRCTL" keyword cursor:no_hardware_cursors "$value" >/dev/null 2>&1
+  else
+    "$HYPRCTL" keyword cursor:no_hardware_cursors "$value" >/dev/null 2>&1
+  fi
+}
+
 client_json() {
   hypr_json clients | jq -c --arg address "$ORIGINAL_ADDRESS" \
     '.[] | select(.address == $address)' | head -n1
@@ -280,6 +292,10 @@ finish() {
   local status=$?
   trap - EXIT INT TERM
   cleanup_layout
+
+  if [[ $CURSOR_OVERRIDE_ACTIVE == 1 && -n $ORIGINAL_NO_HW_CURSORS ]]; then
+    set_no_hw_cursors "$ORIGINAL_NO_HW_CURSORS" || true
+  fi
 
   [[ -n $RUNTIME_DIR && -d $RUNTIME_DIR ]] && rm -rf -- "$RUNTIME_DIR"
 
@@ -368,6 +384,15 @@ flock -n 9 || fail "another Retina Screenshot capture is already running"
 
 INITIAL_FOCUSED_WINDOW=$(hypr_json activewindow 2>/dev/null || printf '{}')
 INITIAL_FOCUSED_ADDRESS=$(jq -r '.address // ""' <<<"$INITIAL_FOCUSED_WINDOW")
+
+# Omarchy's stock screenshot path forces hardware cursors while its frozen
+# picker is active. Without this, software cursor mode can leave the normal
+# arrow baked into the freeze while slurp's live selection cursor is invisible.
+ORIGINAL_NO_HW_CURSORS=$("$HYPRCTL" getoption cursor:no_hardware_cursors -j 2>/dev/null |
+  jq -r '.int // empty' 2>/dev/null || true)
+if [[ $ORIGINAL_NO_HW_CURSORS =~ ^[0-9]+$ ]] && set_no_hw_cursors 0; then
+  CURSOR_OVERRIDE_ACTIVE=1
+fi
 
 PICKER_MODE="$CAPTURE_MODE"
 [[ $CAPTURE_MODE == window ]] && PICKER_MODE="windows"
