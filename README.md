@@ -1,4 +1,17 @@
-# Retina Screenshot for Omarchy
+<div align="center">
+  <img src="assets/retina-screenshot-hero.png" alt="Retina Screenshot — true high-DPI capture for Omarchy" width="100%">
+
+  <p><strong>Genuinely high-resolution region and window screenshots for Omarchy.</strong></p>
+
+  <p>
+    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.4-f97360" alt="Version 1.1.4"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5b342" alt="MIT License"></a>
+    <img src="https://img.shields.io/badge/Omarchy-4.x-22272e" alt="Omarchy 4.x">
+    <img src="https://img.shields.io/badge/Hyprland-0.55%2B-58e1ff" alt="Hyprland 0.55 or newer">
+  </p>
+</div>
+
+## What it does
 
 Retina Screenshot lets you select a region inside any visible window, or select
 a whole window, before moving its **entire workspace** to a temporary 2×
@@ -38,7 +51,7 @@ a 3440×1440 output at 1.25× has a 2752×1152 logical area, so v1 creates a
 From a published Git repository:
 
 ```bash
-omarchy plugin add https://github.com/USER/omarchy-retina-screenshot.git --enable --yes
+omarchy plugin add https://github.com/markey/omarchy-retina-screenshot.git --enable --yes
 ```
 
 For local development:
