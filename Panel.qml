@@ -16,6 +16,8 @@ Panel {
   readonly property var barIdentity: hostWidget || root
   property string resultText: ""
   property bool captureProducedOutput: false
+  property var pendingCommand: []
+  readonly property bool captureBusy: captureDelay.running || captureProcess.running
 
   readonly property string scriptPath: decodeURIComponent(
     String(Qt.resolvedUrl("scripts/retina-screenshot")).replace(/^file:\/\//, ""))
@@ -33,17 +35,19 @@ Panel {
   }
 
   function capture(mode) {
-    if (captureProcess.running || (!copyEnabled && !saveEnabled)) return
-    resultText = "Capturing…"
+    if (root.captureBusy || (!copyEnabled && !saveEnabled)) return
+    resultText = "Preparing…"
     captureProducedOutput = false
-    captureProcess.command = [
+    pendingCommand = [
+      "timeout", "--signal=TERM", "--kill-after=3s", "180s",
       scriptPath,
       mode,
       "--scale", "2",
       copyEnabled ? "--copy" : "--no-copy",
       saveEnabled ? "--save" : "--no-save"
     ]
-    captureProcess.running = true
+    root.close()
+    captureDelay.restart()
   }
 
   function switchPanel(direction) {
@@ -68,6 +72,17 @@ Panel {
       if (exitCode === 0 && !root.captureProducedOutput) root.resultText = "Cancelled"
       else if (exitCode === 0) root.resultText = root.saveEnabled ? "Saved" : "Copied"
       else root.resultText = "Capture failed — see notification"
+    }
+  }
+
+  Timer {
+    id: captureDelay
+    interval: 250
+    repeat: false
+    onTriggered: {
+      captureProcess.command = root.pendingCommand
+      captureProcess.running = true
+      root.resultText = "Capturing…"
     }
   }
 
@@ -114,7 +129,7 @@ Panel {
         CheckBox {
           text: "Copy to clipboard"
           checked: root.copyEnabled
-          enabled: !captureProcess.running
+          enabled: !root.captureBusy
           onToggled: if (checked !== root.copyEnabled)
             root.persistSetting("copyToClipboard", checked)
         }
@@ -122,21 +137,21 @@ Panel {
         CheckBox {
           text: "Save screenshot"
           checked: root.saveEnabled
-          enabled: !captureProcess.running
+          enabled: !root.captureBusy
           onToggled: if (checked !== root.saveEnabled)
             root.persistSetting("saveScreenshot", checked)
         }
 
         Button {
-          text: captureProcess.running ? "Capturing…" : "Select a region"
-          enabled: !captureProcess.running && (root.copyEnabled || root.saveEnabled)
+          text: root.captureBusy ? "Capturing…" : "Select a region"
+          enabled: !root.captureBusy && (root.copyEnabled || root.saveEnabled)
           Layout.fillWidth: true
           onClicked: root.capture("--region")
         }
 
         Button {
           text: "Select a whole window"
-          enabled: !captureProcess.running && (root.copyEnabled || root.saveEnabled)
+          enabled: !root.captureBusy && (root.copyEnabled || root.saveEnabled)
           Layout.fillWidth: true
           onClicked: root.capture("--window")
         }

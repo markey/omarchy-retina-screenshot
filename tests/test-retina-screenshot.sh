@@ -82,6 +82,11 @@ cat >"$BIN/omarchy-capture-region" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'picker %s\n' "$*" >>"${MOCK_STATE:?}/log"
+printf 'picker-stdin %s\n' "$(readlink /proc/$$/fd/0)" >>"${MOCK_STATE:?}/log"
+if [[ ${MOCK_PICKER_HANG:-0} == 1 ]]; then
+  printf '%s\n' "$$" >"${MOCK_STATE:?}/picker-pid"
+  sleep 30
+fi
 case ${1:-region} in
   region) printf '1100,200 200x150\n' ;;
   windows) printf '1000,100 600x500\n' ;;
@@ -131,6 +136,7 @@ run_capture() {
 result=$(MOCK_WL_COPY_HOLD=1 run_capture)
 [[ -f $result ]]
 grep -q 'picker region' "$STATE/log"
+grep -q 'picker-stdin /dev/null' "$STATE/log"
 grep -q 'keyword cursor:no_hardware_cursors 0' "$STATE/log"
 grep -q 'output create headless RETINA-' "$STATE/log"
 grep -q 'keyword monitor RETINA-.*3840x2160@60,auto,2' "$STATE/log"
@@ -162,4 +168,17 @@ grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 
-printf 'ok: region, selected-window, and failure cleanup paths\n'
+: >"$STATE/log"
+start_seconds=$SECONDS
+result=$(MOCK_PICKER_HANG=1 RETINASHOT_PICKER_TIMEOUT=0.2 run_capture)
+[[ -z $result ]]
+((SECONDS - start_seconds < 3))
+picker_pid=$(cat "$STATE/picker-pid")
+! kill -0 "$picker_pid" 2>/dev/null
+grep -q 'picker-stdin /dev/null' "$STATE/log"
+(
+  exec 8>"$TEST_DIR/retina-screenshot.lock"
+  flock -n 8
+)
+
+printf 'ok: region, selected-window, bounded picker, lock, and failure cleanup paths\n'

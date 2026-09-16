@@ -113,6 +113,16 @@ no copy of the capture-lock descriptor, so they cannot block the next capture.
 The picker also temporarily uses Omarchy's hardware-cursor setting so the live
 selection cursor remains visible over the frozen desktop, restoring the user's
 previous cursor mode on every exit path.
+Picker startup is deferred until the Shell has finished dispatching the bar or
+panel click, preventing the new selection surface from inheriting a stale
+pointer grab.
+
+The picker always receives `/dev/null` on stdin so Quickshell's open process
+pipe cannot make `slurp` wait forever for rectangle input. Picker descendants
+do not inherit the capture lock, the picker has a 60-second deadline, the full
+Shell action has a three-minute watchdog, and capture/clipboard/notification
+helpers have their own short deadlines. Cancellation and signals terminate the
+entire picker process group before restoring cursor and desktop state.
 
 Pinned windows and special workspaces are rejected in v1 because moving them
 safely without changing unrelated desktop state is not guaranteed.
