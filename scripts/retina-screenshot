@@ -5,6 +5,7 @@ set -Eeuo pipefail
 VERSION="1.1.4"
 SCALE=2
 SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY:-1.0}"
+RESTORE_DELAY="${RETINASHOT_RESTORE_DELAY:-0.12}"
 PICKER_TIMEOUT="${RETINASHOT_PICKER_TIMEOUT:-60}"
 DO_COPY=1
 DO_SAVE=1
@@ -47,6 +48,7 @@ ORIGINAL_WINDOW=''
 ORIGINAL_ADDRESS=""
 ORIGINAL_WORKSPACE=""
 ORIGINAL_MONITOR=""
+ORIGINAL_MONITOR_ID=""
 ORIGINAL_AT_X=0
 ORIGINAL_AT_Y=0
 ORIGINAL_WIDTH=0
@@ -302,8 +304,13 @@ cleanup_freeze() {
 }
 
 cleanup_layout() {
-  local monitor_now=""
+  local monitor_now="" current="" current_monitor="" current_geometry=""
+  local previous_geometry="" active_workspace="" stable_count=0
+  local layout_changed=0
   set +e
+  if ((WORKSPACE_MOVED == 1 || OUTPUT_CREATED == 1)); then
+    layout_changed=1
+  fi
 
   if [[ $WORKSPACE_MOVED == 1 && -n $ORIGINAL_WORKSPACE && -n $ORIGINAL_MONITOR ]]; then
     monitor_now=$(workspace_monitor 2>/dev/null)
@@ -311,6 +318,14 @@ cleanup_layout() {
       log "restoring workspace $ORIGINAL_WORKSPACE to $ORIGINAL_MONITOR"
       move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$ORIGINAL_MONITOR" || true
     fi
+
+    # Dispatch completion does not mean the workspace has reached the physical
+    # output yet. Keep the frozen cover up while that state propagates.
+    for _ in {1..20}; do
+      monitor_now=$(workspace_monitor 2>/dev/null)
+      [[ $monitor_now == "$ORIGINAL_MONITOR" ]] && break
+      sleep 0.05
+    done
   fi
 
   if [[ $OUTPUT_CREATED == 1 && -n $OUTPUT_NAME ]]; then
@@ -332,6 +347,37 @@ cleanup_layout() {
     focus_window "$INITIAL_FOCUSED_ADDRESS" || true
   elif [[ -n $ORIGINAL_ADDRESS ]]; then
     focus_window "$ORIGINAL_ADDRESS" || true
+  fi
+
+  if [[ $layout_changed == 1 && -n $ORIGINAL_ADDRESS && -n $ORIGINAL_MONITOR_ID ]]; then
+    # Wait until the restored workspace is actually visible and the selected
+    # window has stopped moving. Hyprland can report successful dispatches one
+    # or two rendered frames before the physical output visually catches up.
+    for _ in {1..20}; do
+      current=$(client_json 2>/dev/null || true)
+      current_monitor=$(jq -r '.monitor // -1' <<<"$current" 2>/dev/null)
+      current_geometry=$(jq -r '[.at[0],.at[1],.size[0],.size[1]] | @tsv' \
+        <<<"$current" 2>/dev/null)
+      active_workspace=$(hypr_json monitors all 2>/dev/null | jq -r \
+        --arg monitor "$ORIGINAL_MONITOR" \
+        '.[] | select(.name == $monitor) | .activeWorkspace.name // ""' | head -n1)
+
+      if [[ $current_monitor == "$ORIGINAL_MONITOR_ID" && \
+            $active_workspace == "$ORIGINAL_WORKSPACE" && \
+            -n $current_geometry && $current_geometry == "$previous_geometry" ]]; then
+        ((stable_count += 1))
+        ((stable_count >= 2)) && break
+      else
+        previous_geometry=$current_geometry
+        stable_count=0
+      fi
+      sleep 0.05
+    done
+
+    # State queries can lead the compositor's visible frame. Hold the cover for
+    # a short final grace period so output removal and workspace animation are
+    # fully presented before revealing the desktop.
+    sleep "$RESTORE_DELAY"
   fi
   set -e
 }
@@ -420,6 +466,8 @@ done
 [[ $SCALE == 2 ]] || fail "currently supports only --scale 2"
 [[ $SETTLE_DELAY =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || \
   fail "--delay must be a non-negative number"
+[[ $RESTORE_DELAY =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || \
+  fail "RETINASHOT_RESTORE_DELAY must be a non-negative number"
 [[ $PICKER_TIMEOUT =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || \
   fail "RETINASHOT_PICKER_TIMEOUT must be a positive number"
 jq -ne --arg value "$PICKER_TIMEOUT" '$value | tonumber > 0' >/dev/null || \

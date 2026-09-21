@@ -74,10 +74,10 @@ if [[ ${1:-} == -j && ${2:-} == monitors ]]; then
   if ((created)); then
     output_name=$(cat "$state/output-name")
     cat <<JSON
-[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0},{"id":2,"name":"$output_name","width":3840,"height":2160,"x":1920,"y":0,"scale":2,"transform":0}]
+[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0,"activeWorkspace":{"name":"1"}},{"id":2,"name":"$output_name","width":3840,"height":2160,"x":1920,"y":0,"scale":2,"transform":0,"activeWorkspace":{"name":"1"}}]
 JSON
   else
-    printf '[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0}]\n'
+    printf '[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0,"activeWorkspace":{"name":"1"}}]\n'
   fi
   exit 0
 fi
@@ -104,6 +104,14 @@ cat >"$BIN/sleep" <<'MOCK'
 #!/usr/bin/env bash
 if [[ ${MOCK_LATE_Y_SHIFT:-0} == 1 && ${1:-} == 0.5 ]]; then
   : >"${MOCK_STATE:?}/late-shift"
+fi
+if [[ ${1:-} == "${RETINASHOT_RESTORE_DELAY:-0.12}" && -f ${MOCK_TEST_DIR:?}/freeze-pids ]]; then
+  freeze_pid=$(tail -n1 "${MOCK_TEST_DIR:?}/freeze-pids")
+  if kill -0 "$freeze_pid" 2>/dev/null; then
+    printf 'freeze alive during visual settle\n' >>"${MOCK_STATE:?}/log"
+  else
+    printf 'freeze missing during visual settle\n' >>"${MOCK_STATE:?}/log"
+  fi
 fi
 exec /usr/bin/sleep "$@"
 MOCK
@@ -175,6 +183,7 @@ run_capture() {
   MOCK_TEST_DIR="$TEST_DIR" \
   XDG_RUNTIME_DIR="$TEST_DIR" \
   RETINASHOT_SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY_OVERRIDE:-0}" \
+  RETINASHOT_RESTORE_DELAY=0.01 \
   RETINASHOT_HYPRCTL_BIN="$BIN/hyprctl" \
   RETINASHOT_GRIM_BIN="$BIN/grim" \
   RETINASHOT_WL_COPY_BIN="$BIN/wl-copy" \
@@ -195,6 +204,7 @@ grep -q 'moveworkspacetomonitor name:1 RETINA-' "$STATE/log"
 grep -q 'grim -g 3020,200 200x150' "$STATE/log"
 grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
 grep -q 'freeze alive during workspace restore' "$STATE/log"
+grep -q 'freeze alive during visual settle' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 grep -q 'focuswindow address:0xabc' "$STATE/log"
 grep -q 'keyword cursor:no_hardware_cursors 2' "$STATE/log"
@@ -226,6 +236,7 @@ if MOCK_GRIM_FAIL=1 run_capture --window >/dev/null 2>&1; then
 fi
 grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
 grep -q 'freeze alive during workspace restore' "$STATE/log"
+grep -q 'freeze alive during visual settle' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
