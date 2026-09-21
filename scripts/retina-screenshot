@@ -650,6 +650,11 @@ for _ in {1..50}; do
 done
 [[ $CLIENT_READY == 1 ]] || fail "the selected window did not arrive on the headless output"
 
+# Give the application and any layer-shell surfaces time to react to the new
+# output before freezing the capture coordinates. Sampling first and sleeping
+# afterward leaves a race where the window can move during the repaint delay.
+sleep "$SETTLE_DELAY"
+
 PREVIOUS_GEOMETRY=""
 STABLE_COUNT=0
 for _ in {1..20}; do
@@ -685,7 +690,6 @@ else
   CAPTURE_HEIGHT=$CURRENT_HEIGHT
 fi
 
-sleep "$SETTLE_DELAY"
 log "capturing ${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}"
 timeout --signal=TERM --kill-after=2s 30s \
   "$GRIM" -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \

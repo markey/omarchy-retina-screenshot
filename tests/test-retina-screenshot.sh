@@ -39,7 +39,12 @@ if [[ ${1:-} == keyword && ${2:-} == monitor ]]; then exit 0; fi
 if [[ ${1:-} == keyword && ${2:-} == cursor:no_hardware_cursors ]]; then exit 0; fi
 if [[ ${1:-} == dispatch ]]; then
   if [[ ${2:-} == moveworkspacetomonitor ]]; then
-    if [[ ${3:-} == *RETINA-* ]]; then : >"$state/moved"; else rm -f "$state/moved"; fi
+    if [[ ${3:-} == *RETINA-* ]]; then
+      : >"$state/moved"
+      rm -f "$state/late-shift"
+    else
+      rm -f "$state/moved" "$state/late-shift"
+    fi
   fi
   exit 0
 fi
@@ -66,8 +71,14 @@ JSON
   exit 0
 fi
 if [[ ${1:-} == -j && ${2:-} == clients ]]; then
-  if ((moved)); then monitor=2; focused_x=2020; target_x=2920; else monitor=1; focused_x=100; target_x=1000; fi
-  printf '[{"address":"0xabc","mapped":true,"hidden":false,"at":[%s,50],"size":[800,600],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"focused-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":0},{"address":"0xdef","mapped":true,"hidden":false,"at":[%s,100],"size":[600,500],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"selected-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":1}]\n' "$focused_x" "$monitor" "$target_x" "$monitor"
+  target_y=100
+  if ((moved)); then
+    monitor=2; focused_x=2020; target_x=2920
+    [[ -f $state/late-shift ]] && target_y=107
+  else
+    monitor=1; focused_x=100; target_x=1000
+  fi
+  printf '[{"address":"0xabc","mapped":true,"hidden":false,"at":[%s,50],"size":[800,600],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"focused-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":0},{"address":"0xdef","mapped":true,"hidden":false,"at":[%s,%s],"size":[600,500],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"selected-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":1}]\n' "$focused_x" "$monitor" "$target_x" "$target_y" "$monitor"
   exit 0
 fi
 if [[ ${1:-} == -j && ${2:-} == workspaces ]]; then
@@ -76,6 +87,14 @@ if [[ ${1:-} == -j && ${2:-} == workspaces ]]; then
   exit 0
 fi
 exit 1
+MOCK
+
+cat >"$BIN/sleep" <<'MOCK'
+#!/usr/bin/env bash
+if [[ ${MOCK_LATE_Y_SHIFT:-0} == 1 && ${1:-} == 0.5 ]]; then
+  : >"${MOCK_STATE:?}/late-shift"
+fi
+exec /usr/bin/sleep "$@"
 MOCK
 
 cat >"$BIN/omarchy-capture-region" <<'MOCK'
@@ -124,7 +143,7 @@ run_capture() {
   MOCK_STATE="$STATE" \
   MOCK_TEST_DIR="$TEST_DIR" \
   XDG_RUNTIME_DIR="$TEST_DIR" \
-  RETINASHOT_SETTLE_DELAY=0 \
+  RETINASHOT_SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY_OVERRIDE:-0}" \
   RETINASHOT_HYPRCTL_BIN="$BIN/hyprctl" \
   RETINASHOT_GRIM_BIN="$BIN/grim" \
   RETINASHOT_WL_COPY_BIN="$BIN/wl-copy" \
@@ -160,6 +179,12 @@ grep -q 'grim -g 2920,100 600x500' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 
 : >"$STATE/log"
+result=$(MOCK_LATE_Y_SHIFT=1 RETINASHOT_SETTLE_DELAY_OVERRIDE=0.5 run_capture)
+[[ -f $result ]]
+grep -q 'grim -g 3020,207 200x150' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+
+: >"$STATE/log"
 if MOCK_GRIM_FAIL=1 run_capture --window >/dev/null 2>&1; then
   echo "expected grim failure" >&2
   exit 1
@@ -181,4 +206,4 @@ grep -q 'picker-stdin /dev/null' "$STATE/log"
   flock -n 8
 )
 
-printf 'ok: region, selected-window, bounded picker, lock, and failure cleanup paths\n'
+printf 'ok: region, late geometry, selected-window, bounded picker, lock, and failure cleanup paths\n'
