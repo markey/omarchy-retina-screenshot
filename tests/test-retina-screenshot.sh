@@ -33,7 +33,10 @@ created=0; moved=0
 [[ -f $state/moved ]] && moved=1
 
 if [[ ${1:-} == output && ${2:-} == create ]]; then
-  printf '%s\n' "${4:-}" >"$state/output-name"; : >"$state/created"; exit 0
+  printf '%s\n' "${4:-}" >"$state/output-name"
+  rm -f "$state/reserved-seen" "$state/reserved-ready"
+  : >"$state/created"
+  exit 0
 fi
 if [[ ${1:-} == output && ${2:-} == remove ]]; then
   rm -f "$state/created" "$state/output-name"; exit 0
@@ -43,6 +46,13 @@ if [[ ${1:-} == keyword && ${2:-} == cursor:no_hardware_cursors ]]; then exit 0;
 if [[ ${1:-} == dispatch ]]; then
   if [[ ${2:-} == moveworkspacetomonitor ]]; then
     if [[ ${3:-} == *RETINA-* ]]; then
+      if [[ ${MOCK_LATE_RESERVED:-0} == 1 ]]; then
+        if [[ -f $state/reserved-ready ]]; then
+          printf 'reservation ready before workspace move\n' >>"$log"
+        else
+          printf 'reservation missing before workspace move\n' >>"$log"
+        fi
+      fi
       : >"$state/moved"
       rm -f "$state/late-shift"
     else
@@ -73,11 +83,18 @@ fi
 if [[ ${1:-} == -j && ${2:-} == monitors ]]; then
   if ((created)); then
     output_name=$(cat "$state/output-name")
+    headless_reserved='[0,26,0,0]'
+    if [[ ${MOCK_LATE_RESERVED:-0} == 1 && ! -f $state/reserved-seen ]]; then
+      headless_reserved='[0,0,0,0]'
+      : >"$state/reserved-seen"
+    else
+      : >"$state/reserved-ready"
+    fi
     cat <<JSON
-[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0,"activeWorkspace":{"name":"1"}},{"id":2,"name":"$output_name","width":3840,"height":2160,"x":1920,"y":0,"scale":2,"transform":0,"activeWorkspace":{"name":"1"}}]
+[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0,"reserved":[0,26,0,0],"activeWorkspace":{"name":"1"}},{"id":2,"name":"$output_name","width":3840,"height":2160,"x":1920,"y":0,"scale":2,"transform":0,"reserved":$headless_reserved,"activeWorkspace":{"name":"1"}}]
 JSON
   else
-    printf '[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0,"activeWorkspace":{"name":"1"}}]\n'
+    printf '[{"id":1,"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,"scale":1,"transform":0,"reserved":[0,26,0,0],"activeWorkspace":{"name":"1"}}]\n'
   fi
   exit 0
 fi
@@ -230,6 +247,13 @@ grep -q 'grim -g 3020,207 200x150' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 
 : >"$STATE/log"
+result=$(MOCK_LATE_RESERVED=1 run_capture)
+[[ -f $result ]]
+grep -q 'reservation ready before workspace move' "$STATE/log"
+! grep -q 'reservation missing before workspace move' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+
+: >"$STATE/log"
 if MOCK_GRIM_FAIL=1 run_capture --window >/dev/null 2>&1; then
   echo "expected grim failure" >&2
   exit 1
@@ -263,4 +287,4 @@ grep -q 'picker-stdin /dev/null' "$STATE/log"
   flock -n 8
 )
 
-printf 'ok: frozen cover, region, late geometry, selected-window, cancellation, bounded picker, lock, and failure cleanup paths\n'
+printf 'ok: frozen cover, reserved margins, region, late geometry, selected-window, cancellation, bounded picker, lock, and failure cleanup paths\n'

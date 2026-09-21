@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.1.4"
+VERSION="1.1.5"
 SCALE=2
 SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY:-1.0}"
 RESTORE_DELAY="${RETINASHOT_RESTORE_DELAY:-0.12}"
@@ -608,6 +608,8 @@ SOURCE_WIDTH=$(jq -r '.width' <<<"$SOURCE_MONITOR_JSON")
 SOURCE_HEIGHT=$(jq -r '.height' <<<"$SOURCE_MONITOR_JSON")
 SOURCE_SCALE=$(jq -r '.scale' <<<"$SOURCE_MONITOR_JSON")
 SOURCE_TRANSFORM=$(jq -r '.transform // 0' <<<"$SOURCE_MONITOR_JSON")
+SOURCE_RESERVED=$(jq -c '.reserved // [0,0,0,0]' <<<"$SOURCE_MONITOR_JSON")
+log "source window geometry ${ORIGINAL_AT_X},${ORIGINAL_AT_Y} ${ORIGINAL_WIDTH}x${ORIGINAL_HEIGHT}; reserved margins $SOURCE_RESERVED"
 
 if ((SOURCE_TRANSFORM % 2 == 1)); then
   LOGICAL_WIDTH=$(jq -nr --argjson h "$SOURCE_HEIGHT" --argjson s "$SOURCE_SCALE" \
@@ -715,6 +717,29 @@ done
 [[ $OUTPUT_READY == 1 ]] || fail "the headless output did not reach the requested mode"
 HEADLESS_ID=$(jq -r '.id' <<<"$HEADLESS_JSON")
 
+# Omarchy Shell creates its bar separately for every output. A newly-created
+# output can report its mode before that layer surface has established the same
+# exclusive zone as the source monitor. Moving a tiled workspace during that
+# interval briefly changes window height, which can make browsers reflow or
+# scroll-anchor their contents even after the final window geometry recovers.
+RESERVED_READY=0
+HEADLESS_RESERVED=$(jq -c '.reserved // [0,0,0,0]' <<<"$HEADLESS_JSON")
+for _ in {1..60}; do
+  HEADLESS_JSON=$(hypr_json monitors all | jq -c --arg name "$OUTPUT_NAME" \
+    '.[] | select(.name == $name)' | head -n1)
+  if [[ -n $HEADLESS_JSON ]]; then
+    HEADLESS_RESERVED=$(jq -c '.reserved // [0,0,0,0]' <<<"$HEADLESS_JSON")
+    if [[ $HEADLESS_RESERVED == "$SOURCE_RESERVED" ]]; then
+      RESERVED_READY=1
+      break
+    fi
+  fi
+  sleep 0.05
+done
+[[ $RESERVED_READY == 1 ]] || \
+  fail "headless output reserved margins did not match the source ($HEADLESS_RESERVED != $SOURCE_RESERVED)"
+log "headless reserved margins matched source: $HEADLESS_RESERVED"
+
 log "moving workspace $ORIGINAL_WORKSPACE to $OUTPUT_NAME"
 move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$OUTPUT_NAME" || \
   fail "could not move workspace $ORIGINAL_WORKSPACE to the headless output"
@@ -754,6 +779,7 @@ done
 
 read -r CURRENT_X CURRENT_Y CURRENT_WIDTH CURRENT_HEIGHT <<<"$CURRENT_GEOMETRY"
 [[ $CURRENT_WIDTH -gt 0 && $CURRENT_HEIGHT -gt 0 ]] || fail "target window has invalid geometry"
+log "settled target window geometry ${CURRENT_X},${CURRENT_Y} ${CURRENT_WIDTH}x${CURRENT_HEIGHT}"
 
 if [[ $CAPTURE_MODE == region ]]; then
   ((REGION_OFFSET_X >= 0 && REGION_OFFSET_Y >= 0)) || fail "selected region moved outside the target window"

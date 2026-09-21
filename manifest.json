@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "mark.retina-screenshot",
   "name": "Retina Screenshot",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "author": "Mark",
   "license": "MIT",
   "description": "Captures a selected region or window after re-rendering its workspace on a temporary high-DPI Hyprland output",

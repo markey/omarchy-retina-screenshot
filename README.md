@@ -4,7 +4,7 @@
   <p><strong>Genuinely high-resolution region and window screenshots for Omarchy.</strong></p>
 
   <p>
-    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.4-f97360" alt="Version 1.1.4"></a>
+    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.5-f97360" alt="Version 1.1.5"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5b342" alt="MIT License"></a>
     <img src="https://img.shields.io/badge/Omarchy-4.x-22272e" alt="Omarchy 4.x">
     <img src="https://img.shields.io/badge/Hyprland-0.55%2B-58e1ff" alt="Hyprland 0.55 or newer">
@@ -163,8 +163,11 @@ safely without changing unrelated desktop state is not guaranteed.
 - XWayland has no general per-output HiDPI mechanism. The script warns but still
   captures; such a window may remain low-resolution or be compositor-scaled.
 - Hyprland does not expose a universal "application finished repainting" event.
-  v1 waits for stable compositor geometry, then uses a configurable one-second
-  repaint delay. Increase `--delay` for a slow application.
+  v1 waits for the temporary output to reproduce the source monitor's reserved
+  margins, then waits for stable compositor geometry and uses a configurable
+  one-second repaint delay. This prevents a late bar reservation from briefly
+  resizing tiled applications before capture. Increase `--delay` for a slow
+  application.
 - Region mode is the default. The selection must fit entirely inside one visible
   regular workspace window. Window mode uses Omarchy's highlighted window picker.
 - Workspace, 3×, and supersampled-downsample modes are not implemented.
