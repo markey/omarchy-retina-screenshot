@@ -5,7 +5,7 @@
   "version": "1.1.5",
   "author": "Mark",
   "license": "MIT",
-  "description": "Captures a selected region or window after re-rendering its workspace on a temporary high-DPI Hyprland output",
+  "description": "Capture crisp 2× regions or windows from a fractionally scaled display. Retina Screenshot re-renders the workspace on a hidden high-DPI Hyprland output, then restores everything without visible workspace switching.",
   "kinds": [
     "service",
     "bar-widget"
