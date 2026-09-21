@@ -137,6 +137,10 @@ no copy of the capture-lock descriptor, so they cannot block the next capture.
 The picker also temporarily uses Omarchy's hardware-cursor setting so the live
 selection cursor remains visible over the frozen desktop, restoring the user's
 previous cursor mode on every exit path.
+The picker keeps that frozen frame over the physical display while the workspace
+visits the headless output, then removes it only after the original workspace,
+window state, and focus have been restored. `grim` is restricted to the named
+headless output, so the frozen cover is never part of the Retina capture.
 Picker startup is deferred until the Shell has finished dispatching the bar or
 panel click, preventing the new selection surface from inheriting a stale
 pointer grab.
@@ -173,8 +177,8 @@ tests/test-retina-screenshot.sh
 ```
 
 The test harness mocks Hyprland and verifies region translation, selection of a
-window other than the focused one, successful cleanup, and cleanup after a
-forced `grim` failure.
+window other than the focused one, frozen-cover ordering and cleanup,
+cancellation, successful cleanup, and cleanup after a forced `grim` failure.
 
 Live verification on the test system produced:
 

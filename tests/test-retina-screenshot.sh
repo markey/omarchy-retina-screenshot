@@ -9,6 +9,9 @@ cleanup() {
   if [[ -f $TEST_DIR/wl-copy-child ]]; then
     while IFS= read -r pid; do kill "$pid" 2>/dev/null || true; done <"$TEST_DIR/wl-copy-child"
   fi
+  if [[ -f $TEST_DIR/freeze-pids ]]; then
+    while IFS= read -r pid; do kill "$pid" 2>/dev/null || true; done <"$TEST_DIR/freeze-pids"
+  fi
   rm -rf -- "$TEST_DIR"
 }
 trap cleanup EXIT
@@ -43,6 +46,14 @@ if [[ ${1:-} == dispatch ]]; then
       : >"$state/moved"
       rm -f "$state/late-shift"
     else
+      if [[ -f ${MOCK_TEST_DIR:?}/freeze-pids ]]; then
+        freeze_pid=$(tail -n1 "${MOCK_TEST_DIR:?}/freeze-pids")
+        if kill -0 "$freeze_pid" 2>/dev/null; then
+          printf 'freeze alive during workspace restore\n' >>"$log"
+        else
+          printf 'freeze missing during workspace restore\n' >>"$log"
+        fi
+      fi
       rm -f "$state/moved" "$state/late-shift"
     fi
   fi
@@ -102,10 +113,24 @@ cat >"$BIN/omarchy-capture-region" <<'MOCK'
 set -euo pipefail
 printf 'picker %s\n' "$*" >>"${MOCK_STATE:?}/log"
 printf 'picker-stdin %s\n' "$(readlink /proc/$$/fd/0)" >>"${MOCK_STATE:?}/log"
+
+keep_freeze=0
+for arg in "$@"; do
+  [[ $arg == --keep-freeze ]] && keep_freeze=1
+done
+
+if ((keep_freeze)); then
+  /usr/bin/sleep 30 </dev/null >/dev/null 2>&1 &
+  freeze_pid=$!
+  printf '%s\n' "$freeze_pid" >>"${MOCK_TEST_DIR:?}/freeze-pids"
+fi
+
 if [[ ${MOCK_PICKER_HANG:-0} == 1 ]]; then
   printf '%s\n' "$$" >"${MOCK_STATE:?}/picker-pid"
   sleep 30
 fi
+((keep_freeze)) && printf '%s\n' "$freeze_pid"
+[[ ${MOCK_PICKER_CANCEL:-0} == 0 ]] || exit 1
 case ${1:-region} in
   region) printf '1100,200 200x150\n' ;;
   windows) printf '1000,100 600x500\n' ;;
@@ -155,17 +180,21 @@ run_capture() {
 result=$(MOCK_WL_COPY_HOLD=1 run_capture)
 [[ -f $result ]]
 grep -q 'picker region' "$STATE/log"
+grep -q 'picker region --keep-freeze' "$STATE/log"
 grep -q 'picker-stdin /dev/null' "$STATE/log"
 grep -q 'keyword cursor:no_hardware_cursors 0' "$STATE/log"
 grep -q 'output create headless RETINA-' "$STATE/log"
 grep -q 'keyword monitor RETINA-.*3840x2160@60,auto,2' "$STATE/log"
 grep -q 'moveworkspacetomonitor name:1 RETINA-' "$STATE/log"
-grep -q 'grim -g 3020,200 200x150' "$STATE/log"
+grep -q 'grim -o RETINA-SCREENSHOT -g 3020,200 200x150' "$STATE/log"
 grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
+grep -q 'freeze alive during workspace restore' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 grep -q 'focuswindow address:0xabc' "$STATE/log"
 grep -q 'keyword cursor:no_hardware_cursors 2' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
+freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
+! kill -0 "$freeze_pid" 2>/dev/null
 (
   exec 8>"$TEST_DIR/retina-screenshot.lock"
   flock -n 8
@@ -175,13 +204,13 @@ grep -q 'keyword cursor:no_hardware_cursors 2' "$STATE/log"
 result=$(run_capture --window)
 [[ -f $result ]]
 grep -q 'picker windows' "$STATE/log"
-grep -q 'grim -g 2920,100 600x500' "$STATE/log"
+grep -q 'grim -o RETINA-SCREENSHOT -g 2920,100 600x500' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 
 : >"$STATE/log"
 result=$(MOCK_LATE_Y_SHIFT=1 RETINASHOT_SETTLE_DELAY_OVERRIDE=0.5 run_capture)
 [[ -f $result ]]
-grep -q 'grim -g 3020,207 200x150' "$STATE/log"
+grep -q 'grim -o RETINA-SCREENSHOT -g 3020,207 200x150' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 
 : >"$STATE/log"
@@ -190,8 +219,17 @@ if MOCK_GRIM_FAIL=1 run_capture --window >/dev/null 2>&1; then
   exit 1
 fi
 grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
+grep -q 'freeze alive during workspace restore' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
+freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
+! kill -0 "$freeze_pid" 2>/dev/null
+
+: >"$STATE/log"
+result=$(MOCK_PICKER_CANCEL=1 run_capture)
+[[ -z $result ]]
+freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
+! kill -0 "$freeze_pid" 2>/dev/null
 
 : >"$STATE/log"
 start_seconds=$SECONDS
@@ -200,10 +238,12 @@ result=$(MOCK_PICKER_HANG=1 RETINASHOT_PICKER_TIMEOUT=0.2 run_capture)
 ((SECONDS - start_seconds < 3))
 picker_pid=$(cat "$STATE/picker-pid")
 ! kill -0 "$picker_pid" 2>/dev/null
+freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
+! kill -0 "$freeze_pid" 2>/dev/null
 grep -q 'picker-stdin /dev/null' "$STATE/log"
 (
   exec 8>"$TEST_DIR/retina-screenshot.lock"
   flock -n 8
 )
 
-printf 'ok: region, late geometry, selected-window, bounded picker, lock, and failure cleanup paths\n'
+printf 'ok: frozen cover, region, late geometry, selected-window, cancellation, bounded picker, lock, and failure cleanup paths\n'

@@ -32,6 +32,7 @@ CANCELLED=0
 CURSOR_OVERRIDE_ACTIVE=0
 ORIGINAL_NO_HW_CURSORS=""
 PICKER_PID=""
+FREEZE_PID=""
 
 INITIAL_FOCUSED_ADDRESS=""
 SELECTION=""
@@ -280,6 +281,26 @@ cleanup_picker() {
   )
 }
 
+cleanup_freeze() {
+  local pid=${FREEZE_PID:-}
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 0
+  FREEZE_PID=""
+
+  (
+    set +e
+    if kill -0 "$pid" 2>/dev/null; then
+      log "removing frozen-screen cover"
+      kill -TERM "$pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+    fi
+    wait "$pid" 2>/dev/null || true
+  )
+}
+
 cleanup_layout() {
   local monitor_now=""
   set +e
@@ -320,6 +341,10 @@ finish() {
   trap - EXIT INT TERM
   cleanup_picker
   cleanup_layout
+  # Keep the original frame visible until the physical workspace, focus, and
+  # window state are back in place. The headless output is created only after
+  # this cover starts, so it is not part of the frozen preview.
+  cleanup_freeze
 
   if [[ $CURSOR_OVERRIDE_ACTIVE == 1 && -n $ORIGINAL_NO_HW_CURSORS ]]; then
     set_no_hw_cursors "$ORIGINAL_NO_HW_CURSORS" || true
@@ -433,7 +458,7 @@ PICKER_MODE="$CAPTURE_MODE"
 log "opening the $CAPTURE_MODE picker"
 PICKER_OUTPUT="$RUNTIME_DIR/selection"
 timeout --signal=TERM --kill-after=2s "${PICKER_TIMEOUT}s" \
-  "$PICKER" "$PICKER_MODE" </dev/null 9>&- >"$PICKER_OUTPUT" &
+  "$PICKER" "$PICKER_MODE" --keep-freeze </dev/null 9>&- >"$PICKER_OUTPUT" &
 PICKER_PID=$!
 if wait "$PICKER_PID"; then
   PICKER_STATUS=0
@@ -441,11 +466,19 @@ else
   PICKER_STATUS=$?
 fi
 PICKER_PID=""
+
+# With --keep-freeze the helper prints the retained hyprpicker PID first and
+# the selected geometry second. Read the PID even on cancellation so every exit
+# path can remove the frozen layer.
+PICKER_FREEZE_PID=$(sed -n '1p' "$PICKER_OUTPUT")
+[[ $PICKER_FREEZE_PID =~ ^[1-9][0-9]*$ ]] && FREEZE_PID=$PICKER_FREEZE_PID
 if [[ $PICKER_STATUS != 0 ]]; then
   CANCELLED=1
   exit 0
 fi
-SELECTION=$(<"$PICKER_OUTPUT")
+[[ -n $FREEZE_PID ]] || fail "the picker did not provide a frozen-screen cover"
+kill -0 "$FREEZE_PID" 2>/dev/null || fail "the frozen-screen cover ended before capture"
+SELECTION=$(sed -n '2p' "$PICKER_OUTPUT")
 [[ -n $SELECTION ]] || { CANCELLED=1; exit 0; }
 
 if [[ $SELECTION =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]+([0-9]+)x([0-9]+)$ ]]; then
@@ -692,7 +725,8 @@ fi
 
 log "capturing ${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}"
 timeout --signal=TERM --kill-after=2s 30s \
-  "$GRIM" -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \
+  "$GRIM" -o "$OUTPUT_NAME" \
+  -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \
   "$CAPTURE_FILE" || fail "grim could not capture the high-DPI selection"
 [[ -s $CAPTURE_FILE ]] || fail "grim produced an empty screenshot"
 
