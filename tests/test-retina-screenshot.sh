@@ -142,6 +142,12 @@ cat >"$BIN/grim" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'grim %s\n' "$*" >>"${MOCK_STATE:?}/log"
+has_output=0; has_geometry=0
+for arg in "$@"; do
+  [[ $arg == -o ]] && has_output=1
+  [[ $arg == -g ]] && has_geometry=1
+done
+((has_output == 0 || has_geometry == 0)) || exit 2
 [[ ${MOCK_GRIM_FAIL:-0} == 0 ]] || exit 1
 printf 'PNG mock image' >"${@: -1}"
 MOCK
@@ -186,7 +192,7 @@ grep -q 'keyword cursor:no_hardware_cursors 0' "$STATE/log"
 grep -q 'output create headless RETINA-' "$STATE/log"
 grep -q 'keyword monitor RETINA-.*3840x2160@60,auto,2' "$STATE/log"
 grep -q 'moveworkspacetomonitor name:1 RETINA-' "$STATE/log"
-grep -q 'grim -o RETINA-SCREENSHOT -g 3020,200 200x150' "$STATE/log"
+grep -q 'grim -g 3020,200 200x150' "$STATE/log"
 grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
 grep -q 'freeze alive during workspace restore' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
@@ -204,13 +210,13 @@ freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
 result=$(run_capture --window)
 [[ -f $result ]]
 grep -q 'picker windows' "$STATE/log"
-grep -q 'grim -o RETINA-SCREENSHOT -g 2920,100 600x500' "$STATE/log"
+grep -q 'grim -g 2920,100 600x500' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 
 : >"$STATE/log"
 result=$(MOCK_LATE_Y_SHIFT=1 RETINASHOT_SETTLE_DELAY_OVERRIDE=0.5 run_capture)
 [[ -f $result ]]
-grep -q 'grim -o RETINA-SCREENSHOT -g 3020,207 200x150' "$STATE/log"
+grep -q 'grim -g 3020,207 200x150' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
 
 : >"$STATE/log"

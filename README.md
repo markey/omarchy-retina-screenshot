@@ -139,8 +139,8 @@ selection cursor remains visible over the frozen desktop, restoring the user's
 previous cursor mode on every exit path.
 The picker keeps that frozen frame over the physical display while the workspace
 visits the headless output, then removes it only after the original workspace,
-window state, and focus have been restored. `grim` is restricted to the named
-headless output, so the frozen cover is never part of the Retina capture.
+window state, and focus have been restored. Because that output is created only
+after the cover starts, the frozen frame is not present in the Retina capture.
 Picker startup is deferred until the Shell has finished dispatching the bar or
 panel click, preventing the new selection surface from inheriting a stale
 pointer grab.

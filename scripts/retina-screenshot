@@ -725,8 +725,7 @@ fi
 
 log "capturing ${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}"
 timeout --signal=TERM --kill-after=2s 30s \
-  "$GRIM" -o "$OUTPUT_NAME" \
-  -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \
+  "$GRIM" -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \
   "$CAPTURE_FILE" || fail "grim could not capture the high-DPI selection"
 [[ -s $CAPTURE_FILE ]] || fail "grim produced an empty screenshot"
 
