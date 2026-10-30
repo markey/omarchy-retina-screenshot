@@ -28,6 +28,46 @@ state=${MOCK_STATE:?}
 log="$state/log"
 printf 'hyprctl %s\n' "$*" >>"$log"
 
+# Exercise the Lua API as well as legacy dispatchers. Execute the generated
+# expression with a strict Lua stub so outdated name: selectors fail as on 0.57.
+if [[ ${1:-} == eval ]]; then
+  [[ ${MOCK_LUA:-0} == 1 ]] || exit 1
+  if ! converted=$(lua - "${2:-}" <<'LUA'
+local function emit(...) for _,v in ipairs({...}) do print(v) end end
+local function workspace(value)
+  assert(type(value)=='string' and not value:match('^name:'), 'Invalid workspace')
+  return value
+end
+hl = {
+  dispatch=function(action) action() end,
+  dsp={
+    workspace={move=function(a)
+      local name=workspace(a.workspace)
+      return function() emit('dispatch','moveworkspacetomonitor','name:'..name..' '..a.monitor) end
+    end},
+    focus=function(a)
+      if a.workspace then
+        local name=workspace(a.workspace)
+        return function() emit('dispatch','workspace','name:'..name) end
+      elseif a.window then return function() emit('dispatch','focuswindow',a.window) end
+      else return function() emit('dispatch','focusmonitor',a.monitor) end end
+    end,
+    window=setmetatable({}, {__index=function() return function() return function() end end end})
+  },
+  monitor=function(a) emit('keyword','monitor',a.output..','..a.mode..',auto,'..a.scale) end,
+  config=function(a) emit('keyword','cursor:no_hardware_cursors',a.cursor.no_hardware_cursors) end
+}
+assert(load(arg[1]))()
+LUA
+  ); then exit 1; fi
+  [[ -n $converted ]] || exit 0
+  mapfile -t arguments <<<"$converted"
+  set -- "${arguments[@]}"
+  printf 'hyprctl %s\n' "$*" >>"$log"
+fi
+
+workspace=1
+[[ -f $state/renumbered ]] && workspace=23
 created=0; moved=0
 [[ -f $state/created ]] && created=1
 [[ -f $state/moved ]] && moved=1
@@ -54,8 +94,10 @@ if [[ ${1:-} == dispatch ]]; then
         fi
       fi
       : >"$state/moved"
+      [[ ${MOCK_RENUMBER:-0} == 0 ]] || : >"$state/renumbered"
       rm -f "$state/late-shift"
     else
+      [[ ${MOCK_RESTORE_FAIL:-0} == 0 ]] || exit 1
       if [[ -f ${MOCK_TEST_DIR:?}/freeze-pids ]]; then
         freeze_pid=$(tail -n1 "${MOCK_TEST_DIR:?}/freeze-pids")
         if kill -0 "$freeze_pid" 2>/dev/null; then
@@ -106,12 +148,12 @@ if [[ ${1:-} == -j && ${2:-} == clients ]]; then
   else
     monitor=1; focused_x=100; target_x=1000
   fi
-  printf '[{"address":"0xabc","mapped":true,"hidden":false,"at":[%s,50],"size":[800,600],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"focused-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":0},{"address":"0xdef","mapped":true,"hidden":false,"at":[%s,%s],"size":[600,500],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":%s,"class":"selected-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":1}]\n' "$focused_x" "$monitor" "$target_x" "$target_y" "$monitor"
+  printf '[{"address":"0xabc","mapped":true,"hidden":false,"at":[%s,50],"size":[800,600],"workspace":{"id":%s,"name":"%s"},"floating":false,"monitor":%s,"class":"focused-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":0},{"address":"0xdef","mapped":true,"hidden":false,"at":[%s,%s],"size":[600,500],"workspace":{"id":%s,"name":"%s"},"floating":false,"monitor":%s,"class":"selected-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0,"focusHistoryID":1}]\n' "$focused_x" "$workspace" "$workspace" "$monitor" "$target_x" "$target_y" "$workspace" "$workspace" "$monitor"
   exit 0
 fi
 if [[ ${1:-} == -j && ${2:-} == workspaces ]]; then
   if ((moved)); then monitor=$(cat "$state/output-name"); id=2; else monitor=DP-1; id=1; fi
-  printf '[{"id":1,"name":"1","monitor":"%s","monitorID":%s}]\n' "$monitor" "$id"
+  printf '[{"id":%s,"name":"%s","monitor":"%s","monitorID":%s}]\n' "$workspace" "$workspace" "$monitor" "$id"
   exit 0
 fi
 exit 1
@@ -119,6 +161,10 @@ MOCK
 
 cat >"$BIN/sleep" <<'MOCK'
 #!/usr/bin/env bash
+if [[ ${MOCK_INTERRUPT:-0} == 1 && ${1:-} == 0.5 ]]; then
+  kill -TERM "$PPID"
+  exit 0
+fi
 if [[ ${MOCK_LATE_Y_SHIFT:-0} == 1 && ${1:-} == 0.5 ]]; then
   : >"${MOCK_STATE:?}/late-shift"
 fi
@@ -287,4 +333,44 @@ grep -q 'picker-stdin /dev/null' "$STATE/log"
   flock -n 8
 )
 
-printf 'ok: frozen cover, reserved margins, region, late geometry, selected-window, cancellation, bounded picker, lock, and failure cleanup paths\n'
+# Cleanup must follow the target window when Omarchy renumbers the workspace.
+: >"$STATE/log"
+result=$(MOCK_RENUMBER=1 run_capture)
+[[ -f $result ]]
+grep -q 'moveworkspacetomonitor name:23 DP-1' "$STATE/log"
+! grep -q 'moveworkspacetomonitor name:1 DP-1' "$STATE/log"
+grep -q 'workspace name:23' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+rm -f "$STATE/renumbered"
+
+# A failed capture still restores the current, renumbered workspace.
+: >"$STATE/log"
+if MOCK_RENUMBER=1 MOCK_GRIM_FAIL=1 run_capture >/dev/null 2>&1; then
+  echo "expected capture failure" >&2; exit 1
+fi
+grep -q 'moveworkspacetomonitor name:23 DP-1' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+rm -f "$STATE/renumbered"
+
+# TERM during repaint must also restore the renumbered workspace.
+: >"$STATE/log"
+if MOCK_RENUMBER=1 MOCK_INTERRUPT=1 RETINASHOT_SETTLE_DELAY_OVERRIDE=0.5 run_capture >/dev/null 2>&1; then
+  echo "expected interrupted capture" >&2; exit 1
+fi
+grep -q 'moveworkspacetomonitor name:23 DP-1' "$STATE/log"
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+rm -f "$STATE/renumbered"
+
+# A failed restoration must not destroy the output holding the user's windows.
+: >"$STATE/log"
+if MOCK_RESTORE_FAIL=1 run_capture >/dev/null 2>&1; then
+  echo "expected restoration failure" >&2; exit 1
+fi
+[[ -f $STATE/created && -f $STATE/moved ]]
+! grep -q 'output remove' "$STATE/log"
+grep -q 'temporary output retained for recovery' "$STATE/log"
+freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
+! kill -0 "$freeze_pid" 2>/dev/null
+rm -f "$STATE/created" "$STATE/moved" "$STATE/output-name"
+
+printf 'ok: frozen cover, reserved margins, region, late geometry, selected-window, cancellation, bounded picker, lock, renumbering, failed restoration, and failure cleanup paths\n'

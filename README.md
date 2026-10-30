@@ -1,10 +1,10 @@
 <div align="center">
   <img src="preview.png" alt="Retina Screenshot — true high-DPI capture for Omarchy" width="100%">
 
-  <p><strong>Genuinely high-resolution region and window screenshots for Omarchy.</strong></p>
+  <p><strong>Beautiful screenshots. Crisp text. Every detail.</strong></p>
 
   <p>
-    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.5-f97360" alt="Version 1.1.5"></a>
+    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.7-f97360" alt="Version 1.1.7"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5b342" alt="MIT License"></a>
     <img src="https://img.shields.io/badge/Omarchy-4.x-22272e" alt="Omarchy 4.x">
     <img src="https://img.shields.io/badge/Hyprland-0.55%2B-58e1ff" alt="Hyprland 0.55 or newer">
@@ -37,9 +37,16 @@ before the temporary output is destroyed.
 - `hyprctl`, `grim`, `wl-copy`, `jq`, `flock`
 - A Wayland-native target application for a guaranteed high-DPI repaint
 
-The current implementation is live-tested on Omarchy 4.0.4 with Hyprland
-0.56.2. It uses Hyprland's Lua monitor/dispatcher API on 0.55+ and retains a
-legacy dispatcher fallback for older Hyprland configurations.
+Earlier releases were live-tested on Omarchy 4.0.4 with Hyprland 0.56.2.
+Version 1.1.7 was live-tested with Hyprland 0.57.0 and Omarchy's 4.5 workspace
+management. Numbered workspaces are expected to remain compatible with the
+older setup, but 1.1.7 has not been live-tested on Omarchy 4.0; custom named
+workspaces on older Hyprland versions remain unverified. The script uses
+Hyprland's Lua monitor/dispatcher API when available and retains a legacy
+dispatcher fallback for older configurations.
+
+**Omarchy 4.5 requires the user-config compatibility helper described below.**
+Installing the plugin alone does not enable that helper.
 
 The script detects the focused monitor's physical size and scale. For example,
 a 3440×1440 output at 1.25× has a 2752×1152 logical area, so v1 creates a
@@ -67,6 +74,58 @@ Left-clicking the bar camera opens Omarchy's frozen-screen region picker. The
 pointer changes to the normal selection cursor; drag a rectangle entirely inside
 the window you want. Right-clicking opens the save/clipboard options panel, with
 separate **Select a region** and **Select a whole window** buttons.
+
+## Hyprland 0.57 selectors
+
+Version 1.1.7 passes workspace names directly to Lua move/focus dispatchers,
+matching Hyprland 0.57's selector API. The former `name:1` selector is rejected
+as `Invalid workspace`; workspace `1` must be passed as `"1"`. Legacy non-Lua
+dispatchers retain their older selector syntax. Dispatcher errors are now
+reported instead of discarded. The mock suite runs both dispatcher paths.
+
+## Omarchy 4.5 workspace compatibility
+
+Version 1.1.7 includes `compat/workspaces.lua`. Omarchy 4.5 assigns workspace
+blocks to monitors, including temporary outputs. If the last physical display
+disconnects, its occupied workspaces can be renumbered onto `FALLBACK`, then fail
+to regain their original numbers when empty persistent workspaces occupy those
+numbers. A config reload during capture can also adopt the captured workspace
+into the temporary output's block.
+
+After installing the plugin, add this **after** `require("default.hypr.omarchy")`
+in `~/.config/hypr/hyprland.lua`:
+
+```lua
+local retina_compat = os.getenv("HOME") .. "/.config/omarchy/plugins/mark.retina-screenshot/compat/workspaces.lua"
+local retina_file = io.open(retina_compat, "r")
+if retina_file then
+  retina_file:close()
+  dofile(retina_compat)
+end
+```
+
+Then run `hyprctl reload` and `hyprctl configerrors`. The optional-file check
+allows normal login if the plugin is subsequently removed. The helper is a
+user-owned workaround for Omarchy 4.5's internal `o.workspaces.reconcile` API,
+not an upstream extension API; future Omarchy versions may require adaptation.
+It is a no-op if that API is unavailable.
+
+The helper defers automatic workspace reconciliation while `FALLBACK` or
+`RETINA-SCREENSHOT` is present, or while no physical display remains. Normal
+reconciliation resumes on the next monitor/config event after temporary outputs
+are gone. It uses output lifetime rather than a process lock, so configuration
+reloads during capture remain covered. No packaged Omarchy files are modified.
+It prevents new renumbering; it does not rearrange already-displaced windows.
+
+Cleanup follows the selected window's address to its current workspace rather
+than assuming the original workspace number survived. If restoration fails,
+the capture reports failure and retains the temporary output and runtime
+`state.json` for recovery instead of destroying an output that may hold windows.
+In that case automatic reconciliation remains deferred until that output is
+removed. Once the physical display is available, use the recorded target window
+to identify its **current** workspace, move that whole workspace back, verify it
+arrived, and only then remove `RETINA-SCREENSHOT`. Do not start another capture
+until recovery is complete.
 
 ## Uninstall
 
@@ -178,13 +237,24 @@ safely without changing unrelated desktop state is not guaranteed.
 omarchy plugin validate .
 bash -n scripts/retina-screenshot tests/test-retina-screenshot.sh
 tests/test-retina-screenshot.sh
+MOCK_LUA=1 tests/test-retina-screenshot.sh
+lua tests/test-workspaces.lua
 ```
 
-The test harness mocks Hyprland and verifies region translation, selection of a
+The test harness mocks Hyprland and verifies renumbered-workspace restoration,
+interruption, failed restoration, region translation, selection of a
 window other than the focused one, frozen-cover ordering and cleanup,
 cancellation, successful cleanup, and cleanup after a forced `grim` failure.
 
-Live verification on the test system produced:
+The Lua test runs the installed Omarchy workspace manager against an in-memory
+desktop, reproducing the fallback bug without the helper and preventing it with
+the helper. It also checks reconciliation during capture and after output removal.
+
+Live verification of 1.1.7 on Hyprland 0.57.0 produced a 5456×2204 PNG from a
+2728×1102 logical test window, with its workspace and geometry restored and the
+temporary output removed. Existing windows kept their workspace assignments.
+
+Earlier live verification (before 1.1.7) on the test system produced:
 
 - floating window: 900×650 logical → 1800×1300 PNG, identical state afterward
 - tiled window: 2728×1102 logical → 5456×2204 PNG, identical state afterward

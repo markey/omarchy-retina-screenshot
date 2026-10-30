@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "mark.retina-screenshot",
   "name": "Retina Screenshot",
-  "version": "1.1.5",
+  "version": "1.1.7",
   "author": "Mark",
   "license": "MIT",
-  "description": "Capture crisp 2× regions or windows from a fractionally scaled display. Retina Screenshot re-renders the workspace on a hidden high-DPI Hyprland output, then restores everything without visible workspace switching.",
+  "description": "Create beautiful, high-resolution screenshots with crisp text and sharp detail. Capture a whole window or just the area you need, then save it or copy it straight to your clipboard.",
   "kinds": [
     "service",
     "bar-widget"
@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "Retina Screenshot",
-    "description": "High-DPI region and window capture",
+    "description": "Beautiful, high-resolution screenshots",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"

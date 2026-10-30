@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.1.5"
+VERSION="1.1.7"
 SCALE=2
 SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY:-1.0}"
 RESTORE_DELAY="${RETINASHOT_RESTORE_DELAY:-0.12}"
@@ -22,6 +22,8 @@ PICKER="${RETINASHOT_PICKER_BIN:-omarchy-capture-region}"
 OUTPUT_NAME=""
 OUTPUT_CREATED=0
 WORKSPACE_MOVED=0
+RESTORE_FAILED=0
+RESTORE_WORKSPACE=""
 RUNTIME_DIR=""
 CAPTURE_FILE=""
 FINAL_PATH=""
@@ -120,13 +122,20 @@ lua_quote() {
 }
 
 lua_dispatch() {
-  "$HYPRCTL" eval "hl.dispatch($1)" >/dev/null
+  local response status
+  if response=$("$HYPRCTL" eval "hl.dispatch($1)" 2>&1); then
+    return 0
+  else
+    status=$?
+    printf 'retina-screenshot: Hyprland dispatcher failed: %s\n' "$response" >&2
+    return "$status"
+  fi
 }
 
 move_workspace_to_monitor() {
   local workspace=$1 monitor=$2
   if [[ $HYPRLAND_LUA == 1 ]]; then
-    lua_dispatch "hl.dsp.workspace.move({ workspace = $(lua_quote "name:$workspace"), monitor = $(lua_quote "$monitor") })"
+    lua_dispatch "hl.dsp.workspace.move({ workspace = $(lua_quote "$workspace"), monitor = $(lua_quote "$monitor") })"
   else
     legacy_dispatch moveworkspacetomonitor "name:$workspace $monitor"
   fi
@@ -153,7 +162,7 @@ focus_monitor() {
 focus_workspace() {
   local workspace=$1
   if [[ $HYPRLAND_LUA == 1 ]]; then
-    lua_dispatch "hl.dsp.focus({ workspace = $(lua_quote "name:$workspace") })"
+    lua_dispatch "hl.dsp.focus({ workspace = $(lua_quote "$workspace") })"
   else
     legacy_dispatch workspace "name:$workspace"
   fi
@@ -225,9 +234,35 @@ client_json() {
     '.[] | select(.address == $address)' | head -n1
 }
 
-workspace_monitor() {
-  hypr_json workspaces | jq -r --arg workspace "$ORIGINAL_WORKSPACE" \
-    '.[] | select(.name == $workspace) | .monitor' | head -n1
+# Workspace numbers can change after monitor events. The target window's
+# address is the stable handle; never recreate a saved workspace name blindly.
+restore_workspace() {
+  local current workspace monitor_now
+  current=$(client_json 2>/dev/null) || return 1
+  [[ -n $current ]] || return 1
+  workspace=$(jq -r '.workspace.name // empty' <<<"$current")
+  [[ -n $workspace && $workspace != special:* ]] || return 1
+  RESTORE_WORKSPACE=$workspace
+  monitor_now=$(hypr_json workspaces | jq -r --arg name "$workspace" \
+    '.[] | select(.name == $name) | .monitor' | head -n1) || return 1
+  if [[ $monitor_now != "$ORIGINAL_MONITOR" ]]; then
+    move_workspace_to_monitor "$workspace" "$ORIGINAL_MONITOR" || return 1
+  fi
+  # The monitor may have reconnected under another numeric ID. Verify its name
+  # against a fresh client/monitor snapshot rather than the original monitor ID.
+  for _ in {1..20}; do
+    current=$(client_json 2>/dev/null || true)
+    if [[ -n $current ]]; then
+      RESTORE_WORKSPACE=$(jq -r '.workspace.name // empty' <<<"$current")
+      if hypr_json monitors all | jq -e --arg name "$ORIGINAL_MONITOR" \
+        --argjson id "$(jq -r '.monitor // -1' <<<"$current")" \
+        'any(.[]; .name == $name and .id == $id)' >/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 0.05
+  done
+  return 1
 }
 
 restore_window_details() {
@@ -304,42 +339,42 @@ cleanup_freeze() {
 }
 
 cleanup_layout() {
-  local monitor_now="" current="" current_monitor="" current_geometry=""
-  local previous_geometry="" active_workspace="" stable_count=0
+  local current="" current_monitor="" current_geometry=""
+  local previous_geometry="" active_workspace="" stable_count=0 current_monitor_name=""
   local layout_changed=0
   set +e
   if ((WORKSPACE_MOVED == 1 || OUTPUT_CREATED == 1)); then
     layout_changed=1
   fi
 
-  if [[ $WORKSPACE_MOVED == 1 && -n $ORIGINAL_WORKSPACE && -n $ORIGINAL_MONITOR ]]; then
-    monitor_now=$(workspace_monitor 2>/dev/null)
-    if [[ $monitor_now != "$ORIGINAL_MONITOR" ]]; then
-      log "restoring workspace $ORIGINAL_WORKSPACE to $ORIGINAL_MONITOR"
-      move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$ORIGINAL_MONITOR" || true
+  if [[ $WORKSPACE_MOVED == 1 ]]; then
+    if ! restore_workspace; then
+      # Removing the output now could strand or renumber its workspace. Leave
+      # it available for recovery, and report failure instead of claiming success.
+      RESTORE_FAILED=1
+      ERROR_MESSAGE="Could not restore the captured workspace to $ORIGINAL_MONITOR; temporary output retained for recovery"
+      return 0
     fi
-
-    # Dispatch completion does not mean the workspace has reached the physical
-    # output yet. Keep the frozen cover up while that state propagates.
-    for _ in {1..20}; do
-      monitor_now=$(workspace_monitor 2>/dev/null)
-      [[ $monitor_now == "$ORIGINAL_MONITOR" ]] && break
-      sleep 0.05
-    done
   fi
 
   if [[ $OUTPUT_CREATED == 1 && -n $OUTPUT_NAME ]]; then
     log "removing temporary output $OUTPUT_NAME"
-    "$HYPRCTL" output remove "$OUTPUT_NAME" >/dev/null 2>&1 || true
+    if ! "$HYPRCTL" output remove "$OUTPUT_NAME" >/dev/null 2>&1; then
+      RESTORE_FAILED=1
+      ERROR_MESSAGE="Could not remove temporary output $OUTPUT_NAME"
+    fi
   fi
 
-  if [[ -n $ORIGINAL_WORKSPACE && -n $ORIGINAL_MONITOR ]]; then
-    monitor_now=$(workspace_monitor 2>/dev/null)
-    if [[ -n $monitor_now && $monitor_now != "$ORIGINAL_MONITOR" ]]; then
-      move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$ORIGINAL_MONITOR" || true
+  if [[ $WORKSPACE_MOVED == 1 ]]; then
+    # Output removal itself can trigger another reconciliation. Follow the
+    # window again and use its current workspace for restoring focus.
+    if ! restore_workspace; then
+      RESTORE_FAILED=1
+      ERROR_MESSAGE="Workspace restoration changed after temporary output removal"
+    else
+      focus_monitor "$ORIGINAL_MONITOR" || true
+      focus_workspace "$RESTORE_WORKSPACE" || true
     fi
-    focus_monitor "$ORIGINAL_MONITOR" || true
-    focus_workspace "$ORIGINAL_WORKSPACE" || true
   fi
 
   [[ -n $ORIGINAL_ADDRESS ]] && restore_window_details
@@ -362,8 +397,10 @@ cleanup_layout() {
         --arg monitor "$ORIGINAL_MONITOR" \
         '.[] | select(.name == $monitor) | .activeWorkspace.name // ""' | head -n1)
 
-      if [[ $current_monitor == "$ORIGINAL_MONITOR_ID" && \
-            $active_workspace == "$ORIGINAL_WORKSPACE" && \
+      current_monitor_name=$(hypr_json monitors all 2>/dev/null | jq -r \
+        --argjson id "${current_monitor:--1}" '.[] | select(.id == $id) | .name' | head -n1)
+      if [[ $current_monitor_name == "$ORIGINAL_MONITOR" && \
+            $active_workspace == "$RESTORE_WORKSPACE" && \
             -n $current_geometry && $current_geometry == "$previous_geometry" ]]; then
         ((stable_count += 1))
         ((stable_count >= 2)) && break
@@ -387,6 +424,7 @@ finish() {
   trap - EXIT INT TERM
   cleanup_picker
   cleanup_layout
+  ((RESTORE_FAILED == 0)) || status=1
   # Keep the original frame visible until the physical workspace, focus, and
   # window state are back in place. The headless output is created only after
   # this cover starts, so it is not part of the frozen preview.
@@ -396,7 +434,13 @@ finish() {
     set_no_hw_cursors "$ORIGINAL_NO_HW_CURSORS" || true
   fi
 
-  [[ -n $RUNTIME_DIR && -d $RUNTIME_DIR ]] && rm -rf -- "$RUNTIME_DIR"
+  if [[ -n $RUNTIME_DIR && -d $RUNTIME_DIR ]]; then
+    if ((RESTORE_FAILED)); then
+      printf 'retina-screenshot: %s; recovery state: %s/state.json\n' "$ERROR_MESSAGE" "$RUNTIME_DIR" >&2
+    else
+      rm -rf -- "$RUNTIME_DIR"
+    fi
+  fi
 
   if [[ $CANCELLED == 1 ]]; then
     exit 0
@@ -413,7 +457,7 @@ finish() {
     [[ $XWAYLAND_WARNING == 1 ]] && \
       notify "Retina Screenshot" "XWayland cannot guarantee a true high-DPI repaint" normal
   elif [[ $status -ne 0 ]]; then
-    notify "Retina Screenshot failed" "${ERROR_MESSAGE:-Unexpected capture error; the desktop was restored}" critical
+    notify "Retina Screenshot failed" "${ERROR_MESSAGE:-Unexpected capture error; check the desktop state}" critical
   fi
 
   exit "$status"
@@ -741,9 +785,9 @@ done
 log "headless reserved margins matched source: $HEADLESS_RESERVED"
 
 log "moving workspace $ORIGINAL_WORKSPACE to $OUTPUT_NAME"
+WORKSPACE_MOVED=1
 move_workspace_to_monitor "$ORIGINAL_WORKSPACE" "$OUTPUT_NAME" || \
   fail "could not move workspace $ORIGINAL_WORKSPACE to the headless output"
-WORKSPACE_MOVED=1
 
 CLIENT_READY=0
 for _ in {1..50}; do
