@@ -4,12 +4,16 @@
   <p><strong>Beautiful screenshots. Crisp text. Every detail.</strong></p>
 
   <p>
-    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.8-f97360" alt="Version 1.1.8"></a>
+    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.9-f97360" alt="Version 1.1.9"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5b342" alt="MIT License"></a>
     <img src="https://img.shields.io/badge/Omarchy-4.x-22272e" alt="Omarchy 4.x">
     <img src="https://img.shields.io/badge/Hyprland-0.55%2B-58e1ff" alt="Hyprland 0.55 or newer">
   </p>
 </div>
+
+Create beautiful, high-resolution screenshots with crisp text and sharp detail. Capture a whole window or just the area you need, then save it or copy it straight to your clipboard.
+
+Behind the scenes, the plugin briefly uses a hidden display at twice the resolution, allowing supported apps to redraw their text and graphics with extra detail. It captures your selection and puts everything back where it was, keeping your screen still and the mouse pointer out of the picture.
 
 ## What it does
 
