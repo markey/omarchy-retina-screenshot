@@ -41,6 +41,7 @@ end
 hl = {
   dispatch=function(action) action() end,
   dsp={
+    cursor={move=function(a) return function() emit('dispatch','movecursor',a.x..' '..a.y) end end},
     workspace={move=function(a)
       local name=workspace(a.workspace)
       return function() emit('dispatch','moveworkspacetomonitor','name:'..name..' '..a.monitor) end
@@ -55,7 +56,7 @@ hl = {
     window=setmetatable({}, {__index=function() return function() return function() end end end})
   },
   monitor=function(a) emit('keyword','monitor',a.output..','..a.mode..',auto,'..a.scale) end,
-  config=function(a) emit('keyword','cursor:no_hardware_cursors',a.cursor.no_hardware_cursors) end
+  config=function(a) for key,value in pairs(a.cursor) do emit('keyword','cursor:'..key,tostring(value)) end end
 }
 assert(load(arg[1]))()
 LUA
@@ -83,7 +84,18 @@ if [[ ${1:-} == output && ${2:-} == remove ]]; then
 fi
 if [[ ${1:-} == keyword && ${2:-} == monitor ]]; then exit 0; fi
 if [[ ${1:-} == keyword && ${2:-} == cursor:no_hardware_cursors ]]; then exit 0; fi
+if [[ ${1:-} == keyword && ${2:-} == cursor:invisible ]]; then
+  [[ ${MOCK_CURSOR_HIDE_FAIL:-0} == 0 || ${3:-} != true ]] || exit 1
+  printf '%s' "${3:-}" >"$state/cursor-invisible"
+  exit 0
+fi
+if [[ ${1:-} == getoption && ${2:-} == cursor:invisible ]]; then
+  [[ -f $state/cursor-invisible ]] || printf '%s' "${MOCK_CURSOR_INITIAL:-false}" >"$state/cursor-invisible"
+  printf '{"bool":%s}\n' "$(cat "$state/cursor-invisible")"
+  exit 0
+fi
 if [[ ${1:-} == dispatch ]]; then
+  if [[ ${2:-} == movecursor ]]; then printf '%s' "${3:-}" >"$state/pointer-position"; fi
   if [[ ${2:-} == moveworkspacetomonitor ]]; then
     if [[ ${3:-} == *RETINA-* ]]; then
       if [[ ${MOCK_LATE_RESERVED:-0} == 1 ]]; then
@@ -112,6 +124,9 @@ if [[ ${1:-} == dispatch ]]; then
   exit 0
 fi
 
+if [[ ${1:-} == -j && ${2:-} == cursorpos ]]; then
+  printf '{"x":400,"y":300}\n'; exit 0
+fi
 if [[ ${1:-} == -j && ${2:-} == activewindow ]]; then
   cat <<JSON
 {"address":"0xabc","mapped":true,"at":[100,50],"size":[800,600],"workspace":{"id":1,"name":"1"},"floating":false,"monitor":1,"class":"mock-app","xwayland":false,"pinned":false,"fullscreen":0,"fullscreenClient":0}
@@ -161,6 +176,11 @@ MOCK
 
 cat >"$BIN/sleep" <<'MOCK'
 #!/usr/bin/env bash
+if [[ ${MOCK_CURSOR_INTERRUPT:-0} == 1 && ${1:-} == 0.1 &&
+      $(cat "${MOCK_STATE:?}/cursor-invisible" 2>/dev/null) == true ]]; then
+  kill -TERM "$PPID"
+  exit 0
+fi
 if [[ ${MOCK_INTERRUPT:-0} == 1 && ${1:-} == 0.5 ]]; then
   kill -TERM "$PPID"
   exit 0
@@ -213,6 +233,9 @@ cat >"$BIN/grim" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'grim %s\n' "$*" >>"${MOCK_STATE:?}/log"
+[[ $(cat "${MOCK_STATE:?}/pointer-position") == '1 1' ]] || exit 1
+[[ $(cat "${MOCK_STATE:?}/cursor-invisible") == true ]] || { echo 'pointer visible during capture' >&2; exit 1; }
+for arg in "$@"; do [[ $arg != -c ]] || exit 1; done
 has_output=0; has_geometry=0
 for arg in "$@"; do
   [[ $arg == -o ]] && has_output=1
@@ -272,6 +295,7 @@ grep -q 'output remove RETINA-' "$STATE/log"
 grep -q 'focuswindow address:0xabc' "$STATE/log"
 grep -q 'keyword cursor:no_hardware_cursors 2' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
+[[ $(cat "$STATE/cursor-invisible") == false ]]
 freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
 ! kill -0 "$freeze_pid" 2>/dev/null
 (
@@ -309,6 +333,7 @@ grep -q 'freeze alive during workspace restore' "$STATE/log"
 grep -q 'freeze alive during visual settle' "$STATE/log"
 grep -q 'output remove RETINA-' "$STATE/log"
 [[ ! -f $STATE/created && ! -f $STATE/moved ]]
+[[ $(cat "$STATE/cursor-invisible") == false ]]
 freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
 ! kill -0 "$freeze_pid" 2>/dev/null
 
@@ -373,4 +398,36 @@ freeze_pid=$(tail -n1 "$TEST_DIR/freeze-pids")
 ! kill -0 "$freeze_pid" 2>/dev/null
 rm -f "$STATE/created" "$STATE/moved" "$STATE/output-name"
 
-printf 'ok: frozen cover, reserved margins, region, late geometry, selected-window, cancellation, bounded picker, lock, renumbering, failed restoration, and failure cleanup paths\n'
+# Successful capture hides the pointer before sampling and restores it afterward.
+: >"$STATE/log"
+result=$(run_capture)
+[[ -f $result && $(cat "$STATE/cursor-invisible") == false ]]
+[[ $(cat "$STATE/pointer-position") == '400 300' ]]
+awk '/keyword cursor:invisible true/ {hidden=1} /^grim / {if (!hidden) exit 1; captured=1} /keyword cursor:invisible false/ {if (!captured) exit 1; restored=1} END {if (!restored) exit 1}' "$STATE/log"
+
+# Already-hidden cursors must stay hidden; never unconditionally show them.
+rm -f "$STATE/cursor-invisible"
+: >"$STATE/log"
+result=$(MOCK_CURSOR_INITIAL=true run_capture)
+[[ -f $result && $(cat "$STATE/cursor-invisible") == true ]]
+! grep -q 'keyword cursor:invisible false' "$STATE/log"
+rm -f "$STATE/cursor-invisible"
+
+# TERM while hidden must unhide the pointer even before grim has started.
+: >"$STATE/log"
+if MOCK_CURSOR_INTERRUPT=1 run_capture >/dev/null 2>&1; then
+  echo "expected capture interruption while cursor is hidden" >&2; exit 1
+fi
+[[ $(cat "$STATE/cursor-invisible") == false ]]
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+
+# A failed hide must abort and restore, rather than save a pointer-bearing shot.
+: >"$STATE/log"
+if MOCK_CURSOR_HIDE_FAIL=1 run_capture >/dev/null 2>&1; then
+  echo "expected cursor hide failure" >&2; exit 1
+fi
+! grep -q '^grim ' "$STATE/log"
+[[ $(cat "$STATE/cursor-invisible") == false ]]
+[[ ! -f $STATE/created && ! -f $STATE/moved ]]
+
+printf 'ok: frozen cover, reserved margins, region, late geometry, selected-window, cancellation, bounded picker, lock, renumbering, failed restoration, cursor exclusion/restoration, and failure cleanup paths\n'

@@ -13,6 +13,9 @@ local manager_source = source:read('*a'); source:close()
 local helper = assert(real_open(root .. '/compat/workspaces.lua', 'r'))
 local helper_source = helper:read('*a'); helper:close()
 io.open = function(path, mode)
+  -- Some Omarchy revisions keep workspace state under omarchy/monitors.
+  -- Keep both layouts inside the same in-memory fixture.
+  path = path:gsub('/omarchy/monitors/workspaces', '/omarchy/monitor-workspaces')
   if mode == 'r' then
     if files[path] == nil then return nil end
     return { lines = function() return files[path]:gmatch('[^\n]+') end, close = function() end }

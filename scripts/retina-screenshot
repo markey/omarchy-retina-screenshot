@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.1.7"
+VERSION="1.1.8"
 SCALE=2
 SETTLE_DELAY="${RETINASHOT_SETTLE_DELAY:-1.0}"
 RESTORE_DELAY="${RETINASHOT_RESTORE_DELAY:-0.12}"
@@ -33,6 +33,9 @@ XWAYLAND_WARNING=0
 HYPRLAND_LUA=0
 CANCELLED=0
 CURSOR_OVERRIDE_ACTIVE=0
+CURSOR_HIDDEN_FOR_CAPTURE=0
+ORIGINAL_CURSOR_INVISIBLE=""
+ORIGINAL_CURSOR_POSITION=""
 ORIGINAL_NO_HW_CURSORS=""
 PICKER_PID=""
 FREEZE_PID=""
@@ -229,6 +232,62 @@ set_no_hw_cursors() {
   fi
 }
 
+set_cursor_invisible() {
+  local value=$1
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    "$HYPRCTL" eval "hl.config({ cursor = { invisible = $value } })" >/dev/null 2>&1 ||
+      "$HYPRCTL" keyword cursor:invisible "$value" >/dev/null 2>&1
+  else
+    "$HYPRCTL" keyword cursor:invisible "$value" >/dev/null 2>&1
+  fi
+}
+
+move_capture_pointer() {
+  if [[ $HYPRLAND_LUA == 1 ]]; then
+    lua_dispatch "hl.dsp.cursor.move({ x = $1, y = $2 })"
+  else
+    legacy_dispatch movecursor "$1 $2"
+  fi
+}
+
+hide_capture_cursor() {
+  ORIGINAL_CURSOR_INVISIBLE=$("$HYPRCTL" getoption cursor:invisible -j | jq -r \
+    'if has("bool") then .bool elif has("int") then (.int != 0) else empty end') ||
+    fail "could not read cursor visibility; refusing a capture that may include the pointer"
+  case $ORIGINAL_CURSOR_INVISIBLE in
+    true) ;;
+    false) ;;
+    *) fail "cursor visibility control is unavailable; cannot exclude the pointer safely" ;;
+  esac
+  # Arm cleanup before changing compositor state, including partial failures.
+  CURSOR_HIDDEN_FOR_CAPTURE=1
+  set_cursor_invisible true || fail "could not hide the mouse pointer for capture"
+  # Headless software-cursor rendering can bypass cursor invisibility. Park the
+  # pointer on the original physical output, outside the capture output, too.
+  local safe_x safe_y
+  safe_x=$(jq -r '.x + 1' <<<"$SOURCE_MONITOR_JSON")
+  safe_y=$(jq -r '.y + 1' <<<"$SOURCE_MONITOR_JSON")
+  move_capture_pointer "$safe_x" "$safe_y" || fail "could not move the pointer outside the capture output"
+  hypr_json cursorpos | jq -e \
+    --argjson x "$CAPTURE_X" --argjson y "$CAPTURE_Y" \
+    --argjson w "$CAPTURE_WIDTH" --argjson h "$CAPTURE_HEIGHT" \
+    '(.x | type) == "number" and (.y | type) == "number" and
+     (.x < $x or .x >= ($x + $w) or .y < $y or .y >= ($y + $h))' >/dev/null ||
+    fail "the mouse pointer could not be moved outside the screenshot"
+  # Let the compositor repaint without a software cursor before grim samples it.
+  sleep 0.1
+}
+
+restore_capture_cursor() {
+  ((CURSOR_HIDDEN_FOR_CAPTURE)) || return 0
+  local position_status=0
+  move_capture_pointer "$(jq -r '.x' <<<"$ORIGINAL_CURSOR_POSITION")" \
+    "$(jq -r '.y' <<<"$ORIGINAL_CURSOR_POSITION")" || position_status=1
+  set_cursor_invisible "$ORIGINAL_CURSOR_INVISIBLE" || return 1
+  CURSOR_HIDDEN_FOR_CAPTURE=0
+  return "$position_status"
+}
+
 client_json() {
   hypr_json clients | jq -c --arg address "$ORIGINAL_ADDRESS" \
     '.[] | select(.address == $address)' | head -n1
@@ -423,6 +482,10 @@ finish() {
   local status=$?
   trap - EXIT INT TERM
   cleanup_picker
+  if ! restore_capture_cursor; then
+    status=1
+    ERROR_MESSAGE="Could not restore mouse pointer visibility"
+  fi
   cleanup_layout
   ((RESTORE_FAILED == 0)) || status=1
   # Keep the original frame visible until the physical workspace, focus, and
@@ -633,6 +696,9 @@ SOURCE_MONITOR_JSON=$(jq -c --argjson id "$ORIGINAL_MONITOR_ID" \
   '.[] | select(.id == $id)' <<<"$MONITORS" | head -n1)
 [[ -n $SOURCE_MONITOR_JSON ]] || fail "could not find the focused window's monitor"
 ORIGINAL_MONITOR=$(jq -r '.name' <<<"$SOURCE_MONITOR_JSON")
+ORIGINAL_CURSOR_POSITION=$(hypr_json cursorpos) || fail "could not read the mouse pointer position"
+jq -e '.x | numbers' <<<"$ORIGINAL_CURSOR_POSITION" >/dev/null &&
+  jq -e '.y | numbers' <<<"$ORIGINAL_CURSOR_POSITION" >/dev/null || fail "invalid mouse pointer position"
 
 ORIGINAL_AT_X=$(jq -r '.at[0]' <<<"$ORIGINAL_WINDOW")
 ORIGINAL_AT_Y=$(jq -r '.at[1]' <<<"$ORIGINAL_WINDOW")
@@ -841,11 +907,20 @@ else
   CAPTURE_HEIGHT=$CURRENT_HEIGHT
 fi
 
+hide_capture_cursor
+# A headless output may still hold the last frame containing a software cursor.
+# Finish one readback after hiding it, then request a fresh frame for the image.
+# Raw PPM to /dev/null avoids a second PNG encode or temporary image on disk.
+timeout --signal=TERM --kill-after=2s 30s \
+  "$GRIM" -t ppm -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \
+  /dev/null || fail "grim could not refresh the cursor-free frame"
+
 log "capturing ${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}"
 timeout --signal=TERM --kill-after=2s 30s \
   "$GRIM" -g "${CAPTURE_X},${CAPTURE_Y} ${CAPTURE_WIDTH}x${CAPTURE_HEIGHT}" \
   "$CAPTURE_FILE" || fail "grim could not capture the high-DPI selection"
 [[ -s $CAPTURE_FILE ]] || fail "grim produced an empty screenshot"
+restore_capture_cursor || fail "could not restore mouse pointer visibility"
 
 if [[ $DO_COPY == 1 ]]; then
   # wl-copy stays alive to serve the Wayland clipboard. Close the capture-lock

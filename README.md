@@ -4,7 +4,7 @@
   <p><strong>Beautiful screenshots. Crisp text. Every detail.</strong></p>
 
   <p>
-    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.7-f97360" alt="Version 1.1.7"></a>
+    <a href="https://github.com/markey/omarchy-retina-screenshot/releases"><img src="https://img.shields.io/badge/version-1.1.8-f97360" alt="Version 1.1.8"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5b342" alt="MIT License"></a>
     <img src="https://img.shields.io/badge/Omarchy-4.x-22272e" alt="Omarchy 4.x">
     <img src="https://img.shields.io/badge/Hyprland-0.55%2B-58e1ff" alt="Hyprland 0.55 or newer">
@@ -40,7 +40,7 @@ before the temporary output is destroyed.
 Earlier releases were live-tested on Omarchy 4.0.4 with Hyprland 0.56.2.
 Version 1.1.7 was live-tested with Hyprland 0.57.0 and Omarchy's 4.5 workspace
 management. Numbered workspaces are expected to remain compatible with the
-older setup, but 1.1.7 has not been live-tested on Omarchy 4.0; custom named
+older setup, but 1.1.8 has not been live-tested on Omarchy 4.0; custom named
 workspaces on older Hyprland versions remain unverified. The script uses
 Hyprland's Lua monitor/dispatcher API when available and retains a legacy
 dispatcher fallback for older configurations.
@@ -77,7 +77,7 @@ separate **Select a region** and **Select a whole window** buttons.
 
 ## Hyprland 0.57 selectors
 
-Version 1.1.7 passes workspace names directly to Lua move/focus dispatchers,
+Version 1.1.8 passes workspace names directly to Lua move/focus dispatchers,
 matching Hyprland 0.57's selector API. The former `name:1` selector is rejected
 as `Invalid workspace`; workspace `1` must be passed as `"1"`. Legacy non-Lua
 dispatchers retain their older selector syntax. Dispatcher errors are now
@@ -85,7 +85,7 @@ reported instead of discarded. The mock suite runs both dispatcher paths.
 
 ## Omarchy 4.5 workspace compatibility
 
-Version 1.1.7 includes `compat/workspaces.lua`. Omarchy 4.5 assigns workspace
+Version 1.1.8 includes `compat/workspaces.lua`. Omarchy 4.5 assigns workspace
 blocks to monitors, including temporary outputs. If the last physical display
 disconnects, its occupied workspaces can be renumbered onto `FALLBACK`, then fail
 to regain their original numbers when empty persistent workspaces occupy those
@@ -214,6 +214,22 @@ entire picker process group before restoring cursor and desktop state.
 
 Pinned windows and special workspaces are rejected in v1 because moving them
 safely without changing unrelated desktop state is not guaranteed.
+
+## Cursor-free screenshots
+
+The mouse pointer is excluded from saved images and the clipboard. It remains
+visible during selection, then is temporarily hidden only for the final capture
+and parked on the original display outside the capture output. Its position and
+previous visibility are restored afterward. One readback is discarded
+to flush a stale compositor frame before the final image. This also excludes software
+cursors on the temporary headless display, which may otherwise appear even
+without grim's cursor flag. Failure and interruption cleanup restore visibility;
+an already-hidden cursor stays hidden. Capture fails clearly if the compositor
+cannot provide visibility control.
+
+Version 1.1.8 was checked with a software pointer deliberately placed over a
+test window: the final image matched the cursor-free reference pixel for pixel,
+and the window, pointer position, and cursor visibility were restored.
 
 ## Accuracy notes
 
